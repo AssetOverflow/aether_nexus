@@ -1,0 +1,7 @@
+[agent]
+max_reflection_steps = 5
+max_tokens = 1024
+
+[memory]
+distill_entropy_threshold = 0.50
+rem_interval_secs = 10

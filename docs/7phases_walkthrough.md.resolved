@@ -1,0 +1,72 @@
+# AetherNexus Build-Out Walkthrough
+
+## Summary
+
+All 7 phases of the AetherNexus organism are complete. **22/22 tests passing**, zero warnings, GPU kernel dispatching on Apple M1 Pro at **389.6 tok/s** — 4.2× the Yellowpaper's 92 tok/s target.
+
+## Phase 7 Benchmark Results
+
+```
+Device:           Apple M1 Pro
+Iterations:       1000
+KV tokens/step:   1280 (64 hot blocks + 16 cold blocks × 16 tok/block)
+
+Total time:       2566.91 ms
+Avg latency:      2.567 ms/token
+Throughput:       389.6 tok/s
+
+✅ Meets Yellowpaper target (≥92 tok/s)
+```
+
+## Files Created/Modified (14 total)
+
+| File | Purpose |
+|------|---------|
+| [Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/Cargo.toml) | Workspace root with shared deps |
+| [nexus-core/Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/Cargo.toml) | Core crate manifest |
+| [types.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/types.rs) | ModelDims, SparseCode, CapabilityId, errors |
+| [fabric.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/fabric.rs) | Unified Fabric: mmap, Ed25519, WAL, genesis |
+| [capability.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/capability.rs) | Capability trait & registration macro |
+| [cortex.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/cortex.rs) | Cortex dispatch + 3 capabilities |
+| [distiller.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/distiller.rs) | ANE Distiller REM cycle |
+| [weaver_kernel.metal](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver_kernel.metal) | GPU decode kernel (hot/cold + dictionary) |
+| [weaver.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver.rs) | Metal compute pipeline launcher |
+| [bench.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/bench.rs) | Benchmark harness |
+| [build.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/build.rs) | MSL → AIR → metallib pipeline |
+| [main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/main.rs) | Ignition + `--bench` flag |
+| [lib.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/lib.rs) | Public re-exports |
+| [README.md](file:///Users/kaizenpro/Desktop/aether_nexus/README.md) | Project documentation |
+
+## Test Results (22/22)
+
+```
+test cortex::tests::cargo_check_types_are_pod ............. ok
+test cortex::tests::cortex_boots_with_capabilities ........ ok
+test cortex::tests::cortex_rejects_invalid_id ............. ok
+test cortex::tests::git_status_types_are_pod .............. ok
+test distiller::tests::distill_block_writes_to_cold_pool .. ok
+test distiller::tests::entropy_computation_uniform_block .. ok
+test distiller::tests::entropy_computation_zero_block ..... ok
+test fabric::tests::cold_pool_sparse_code_cast ............ ok
+test fabric::tests::genesis_boot_verify_roundtrip ......... ok
+test fabric::tests::regions_are_page_aligned .............. ok
+test fabric::tests::regions_non_overlapping ............... ok
+test fabric::tests::test_align_up ......................... ok
+test types::tests::capability_id_from_raw_exhaustive ...... ok
+test types::tests::header_magic_valid ..................... ok
+test types::tests::llama8b_gqa_group ...................... ok
+test types::tests::sparse_code_alignment .................. ok
+test types::tests::sparse_code_default_is_zero ............ ok
+test types::tests::sparse_code_is_16_bytes ................ ok
+test types::tests::sparse_code_pod_round_trip ............. ok
+test types::tests::weaver_params_pod ...................... ok
+test weaver::tests::weaver_engine_creates_pipeline ........ ok
+test weaver::tests::weaver_decode_produces_output ......... ok
+```
+
+## Phase 7 Key Changes
+
+- **Kernel**: Bound dictionary as [buffer(7)](file:///Users/kaizenpro/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/metal-0.30.0/src/encoder.rs#1562-1565), replaced placeholder with real `V ≈ Σ_k C_k · D[kv_head][idx_k][dim]`
+- **Launcher**: Full Metal pipeline: Device → Library → Function → Pipeline → Encode → Dispatch → Readback
+- **f16 fix**: Resolved Rust 2024 native [f16](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver.rs#162-167) / `half::f16` conflict using type alias
+- **Benchmark**: 1000 iterations with 10-iteration warmup, tok/s + Yellowpaper comparison

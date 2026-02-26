@@ -1,0 +1,34 @@
+# AetherNexus Build-Out
+
+## Phase 1 – Workspace & Core Types
+- [x] Root [Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/Cargo.toml) (workspace)
+- [x] [nexus-core/Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/Cargo.toml) (corrected dependencies)
+- [x] [nexus-core/src/types.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/types.rs) (ModelDims, SparseCode, CapabilityId, LoomDescriptor, WeaverParams)
+- [x] [nexus-core/src/lib.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/lib.rs) (public re-exports)
+- [x] Delete old [src/main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/src/main.rs)
+- [x] [.gitignore](file:///Users/kaizenpro/Desktop/aether_nexus/.gitignore) update
+- [x] Verification: `cargo check` ✅, 8/8 tests ✅
+
+## Phase 2 – Unified Fabric
+- [x] [nexus-core/src/fabric.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/fabric.rs) (mmap boot, sub-views, Ed25519 verification, WAL)
+- [x] Verification: boot test + alignment asserts ✅ (13/13 tests)
+
+## Phase 3 – Weaver Kernel & Build Pipeline
+- [x] [nexus-core/src/weaver_kernel.metal](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver_kernel.metal)
+- [x] [nexus-core/build.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/build.rs)
+- [x] Verification: `cargo build` + metallib generated ✅
+
+## Phase 4 – Capability Cortex
+- [x] [nexus-core/src/capability.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/capability.rs)
+- [x] [nexus-core/src/cortex.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/cortex.rs)
+- [x] Verification: dispatch unit tests ✅ (17/17 tests)
+
+## Phase 5 – Distiller & REM Cycle
+- [x] [nexus-core/src/distiller.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/distiller.rs)
+- [x] Verification: entropy → SparseCode round-trip ✅
+
+## Phase 6 – Ignition, Bundle & Polish
+- [x] [nexus-core/src/main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/main.rs)
+- [x] `scripts/bundle.rs` (genesis is in `fabric::create_genesis` + [main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/src/main.rs) auto-genesis)
+- [x] [README.md](file:///Users/kaizenpro/Desktop/aether_nexus/README.md)
+- [x] Verification: end-to-end `cargo run` ✅ (20/20 tests, organism boots)

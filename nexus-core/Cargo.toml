@@ -1,0 +1,33 @@
+[package]
+name = "nexus-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AetherNexus – A Sovereign Tensor Organism for Apple Silicon"
+
+[dependencies]
+mlx-rs.workspace = true
+metal.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+thiserror.workspace = true
+memmap2.workspace = true
+ring.workspace = true
+tokio.workspace = true
+grep-searcher.workspace = true
+grep-regex.workspace = true
+grep-matcher.workspace = true
+git2.workspace = true
+tree-sitter.workspace = true
+safetensors.workspace = true
+wasmtime = "21.0.2"
+tokenizers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+minijinja = "2.16.0"
+toml = "1.0.3"
+
+[build-dependencies]
+cc = "1.2"

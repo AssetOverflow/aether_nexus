@@ -1,0 +1,86 @@
+# AetherNexus Build-Out Walkthrough
+
+## What Was Built
+
+All 6 phases of the AetherNexus organism were implemented from scratch, transforming a bare `hello world` into a fully compiling, runnable sovereign tensor organism.
+
+### Files Created (11 total)
+
+| File | Purpose | Lines |
+|------|---------|-------|
+| [Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/Cargo.toml) | Workspace root with corrected dependencies | 23 |
+| [nexus-core/Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/Cargo.toml) | Core crate manifest | 23 |
+| [types.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/types.rs) | ModelDims, SparseCode, CapabilityId, errors, constants | ~320 |
+| [fabric.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/fabric.rs) | Unified Fabric: mmap, Ed25519, WAL, genesis | ~350 |
+| [capability.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/capability.rs) | Capability trait, handler gen, registration macro | ~115 |
+| [cortex.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/cortex.rs) | Cortex dispatch + CargoCheck, VectorSearch, GitStatus | ~340 |
+| [distiller.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/distiller.rs) | ANE Distiller REM cycle | ~220 |
+| [weaver_kernel.metal](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver_kernel.metal) | GPU decode kernel (MSL) | ~200 |
+| [build.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/build.rs) | Metal shader compilation pipeline | ~65 |
+| [main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/main.rs) | Ignition sequence | ~90 |
+| [README.md](file:///Users/kaizenpro/Desktop/aether_nexus/README.md) | Project documentation | ~100 |
+
+### Dependency Corrections Applied
+
+| Original (Docs) | Corrected (Implemented) |
+|------------------|------------------------|
+| Bare `f16` type | `half::f16` with `bytemuck` feature |
+| [cargo](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/cortex.rs#389-408) as library | `std::process::Command` subprocess |
+| `ripgrep` crate | `grep-searcher` + `grep-regex` + `grep-matcher` |
+| `mlx-rs` fictional APIs | Real 0.21 API: [from_slice](file:///Users/kaizenpro/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mlx-rs-0.21.2/src/array/mod.rs#128-145), [as_slice](file:///Users/kaizenpro/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/mlx-rs-0.21.2/src/array/mod.rs#369-390), etc. |
+| Missing `tokio` | Added for async Distiller |
+
+## Test Results
+
+```
+running 20 tests
+test cortex::tests::cargo_check_types_are_pod ... ok
+test cortex::tests::cortex_boots_with_capabilities ... ok
+test cortex::tests::cortex_rejects_invalid_id ... ok
+test cortex::tests::git_status_types_are_pod ... ok
+test distiller::tests::distill_block_writes_to_cold_pool ... ok
+test distiller::tests::entropy_computation_uniform_block ... ok
+test distiller::tests::entropy_computation_zero_block ... ok
+test fabric::tests::cold_pool_sparse_code_cast ... ok
+test fabric::tests::genesis_boot_verify_roundtrip ... ok
+test fabric::tests::regions_are_page_aligned ... ok
+test fabric::tests::regions_non_overlapping ... ok
+test fabric::tests::test_align_up ... ok
+test types::tests::capability_id_from_raw_exhaustive ... ok
+test types::tests::header_magic_valid ... ok
+test types::tests::llama8b_gqa_group ... ok
+test types::tests::sparse_code_alignment ... ok
+test types::tests::sparse_code_default_is_zero ... ok
+test types::tests::sparse_code_is_16_bytes ... ok
+test types::tests::sparse_code_pod_round_trip ... ok
+test types::tests::weaver_params_pod ... ok
+
+test result: ok. 20 passed; 0 failed
+```
+
+## End-to-End Ignition Output
+
+```
+╔══════════════════════════════════════════════════╗
+║   AetherNexus v1.3 – Sovereign Tensor Organism  ║
+╚══════════════════════════════════════════════════╝
+
+[GENESIS] Created signed .aether file at 'brain.aether'
+[BOOT] Fabric mapped: 6849 MB
+[BOOT] Hot pool: 256 MB | Cold pool: 64 MB | Dict: 1024 KB
+[CORTEX] 3 capabilities registered (CargoCheck, VectorSearch, GitStatus)
+[LOOMS] Planner, Coder, Critic, Reviewer – initialized
+
+Forge eternal.
+```
+
+## Yellowpaper Invariants Verified
+
+- ✅ [SparseCode](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/types.rs#52-58) is exactly **16 bytes** (128-bit vector load)
+- ✅ Fabric regions are **16 KB page-aligned**
+- ✅ Regions are **non-overlapping** (verified by test)
+- ✅ Genesis → Boot → Ed25519 Verify **roundtrip passes**
+- ✅ `Pod + Zeroable` on all capability args/results
+- ✅ Metal shader compiles to **metallib** via [build.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/build.rs)
+- ✅ Cortex **rejects invalid capability IDs**
+- ✅ Cold pool **casts to SparseCode slice** (zero-copy)

@@ -1,0 +1,147 @@
+# AetherNexus – Documentation Review & Build-Out Plan
+
+## Documentation Review Summary
+
+I've read all four docs end-to-end. The vision is extraordinary — a single mmap'd tensor organism with zero-copy everything, running on Apple Silicon. Here's a candid assessment.
+
+### What's Excellent
+
+- **Unified Fabric concept** — one `#[repr(C, align(16384))]` struct owning the entire cognitive state is architecturally sound and plays to the M1's UMA strengths
+- **SparseCode at 16 bytes** — aligns to a 128-bit vector load; real mechanical sympathy
+- **Decompression-free sparse attention math** — the identity `Q·K^T ≈ (Q·D)·C` is elegant and correct
+- **Metal kernel design** — pre-segmented hot/cold passes to eliminate SIMD divergence is the right approach
+- **Typed Capability Cortex** — `Pod + Zeroable` trait bounds + exhaustive enum dispatch is solid Rust
+- **Persistence model** — WAL at 300ms with Ed25519 hash-chain verification is practical
+
+### Critical Issues to Address Before Building
+
+> [!CAUTION]
+> Several dependencies listed in the docs don't exist as described or have unstable APIs.
+
+| Issue | Doc Claim | Reality |
+|-------|-----------|---------|
+| **`f16` type** | Used bare `f16` in `SparseCode` | Rust has no stable `f16`. Must use `half::f16` with `bytemuck` feature |
+| **`cargo` as library** | `cargo = { version = "0.85" }` | The `cargo` crate is not published on crates.io for external use. Its API is unstable and discouraged for third-party consumption |
+| **`ripgrep` as library** | `ripgrep = { version = "14" }` | `ripgrep` is a binary, not a library crate. Must use `grep-searcher`, `grep-regex`, `grep-matcher` family |
+| **`mlx-rs` API** | `Array::from_bytes`, `subarray`, `subslice_mut`, `to_device_ane()`, `Device::ANE` | These specific APIs don't exist in mlx-rs 0.21. Real API uses `Array::from_slice`, `slice`, `slice_update`. No ANE device target |
+| **`mlx_rs::ops::topk`** | Used in distiller | Does not exist in mlx-rs 0.21 |
+| **Edition 2024** | `edition = "2024"` in Cargo.toml | Requires Rust 1.85+ (Feb 2025 nightly/stable). This is fine but should be verified |
+| **`mlx_rs::Stream`** | Used in main.rs ignition | Not a public API in mlx-rs |
+
+> [!IMPORTANT]
+> The docs are visionary design documents, not copy-paste-compilable code. We need to build a **real, compiling** foundation that honors the architecture while using **actual crate APIs**.
+
+### Recommendations
+
+1. **Use `half` crate** for `f16` with `bytemuck` feature enabled
+2. **Replace `cargo`-as-library** with `std::process::Command` calling `cargo check` (still air-gapped, just invokes the local toolchain) — or defer this capability
+3. **Replace `ripgrep`** dependency with `grep-searcher` + `grep-regex` crates
+4. **Adapt mlx-rs calls** to match the real 0.21 API surface, using `Array::from_slice`, `slice()`, etc.
+5. **Build incrementally** — get each layer compiling before the next
+6. **Add `tokio`** as a dependency (used in distiller but not listed)
+
+---
+
+## Proposed Changes
+
+The build-out follows the REPOSITORY_SKELETON.md structure, adapted for real APIs. We'll do this in layers so each phase compiles.
+
+---
+
+### Phase 1 – Workspace & Core Types
+
+Set up the Cargo workspace and implement the foundational types that everything else depends on.
+
+#### [MODIFY] [Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/Cargo.toml)
+Convert from a single package to a workspace root matching the skeleton's structure.
+
+#### [NEW] [nexus-core/Cargo.toml](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/Cargo.toml)
+Core crate with real, verified dependencies: `mlx-rs`, `metal`, `bytemuck`, `half`, `thiserror`, `memmap2`, `ring`, `tokio`.
+
+#### [NEW] [nexus-core/src/lib.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/lib.rs)
+Public re-exports of all modules.
+
+#### [NEW] [nexus-core/src/types.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/types.rs)
+- `ModelDims` trait with const defaults (Llama 8B dimensions)
+- `SparseCode` struct using `half::f16`, with `Pod + Zeroable` derives
+- `CapabilityId` exhaustive enum
+- `LoomDescriptor` struct with index tensors
+- `WeaverParams` struct for Metal kernel parameters
+
+#### [DELETE] [src/main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/src/main.rs)
+Remove the placeholder; [main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/src/main.rs) moves into nexus-core.
+
+---
+
+### Phase 2 – The Unified Fabric
+
+#### [NEW] [nexus-core/src/fabric.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/fabric.rs)
+- `Fabric<D: ModelDims>` struct with mmap boot sequence
+- Ed25519 signature verification on boot (using `ring`)
+- Zero-copy sub-view creation for hot_pool, cold_pool, dictionary, observation_bufs
+- WAL persistence method (tensor-level delta log)
+- Layout constants computed from `ModelDims`
+
+---
+
+### Phase 3 – Capability Cortex
+
+#### [NEW] [nexus-core/src/capability.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/capability.rs)
+- `Capability` trait definition
+- `register_capability!` macro
+- `CortexError` error type (via `thiserror`)
+
+#### [NEW] [nexus-core/src/cortex.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/cortex.rs)
+- `Cortex` struct with handler map
+- `boot()` and `dispatch()` methods
+- Initial capability implementations: `CargoCheck` (via subprocess), `VectorSearch` (MLX matmul), `GitStatus` (libgit2)
+
+---
+
+### Phase 4 – Weaver Kernel & Build Pipeline
+
+#### [NEW] [nexus-core/src/weaver_kernel.metal](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/weaver_kernel.metal)
+Full MSL kernel with online softmax, GQA strides, pre-segmented hot/cold passes.
+
+#### [NEW] [nexus-core/build.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/build.rs)
+Metal shader compilation pipeline: MSL → AIR → metallib via `xcrun`.
+
+---
+
+### Phase 5 – Distiller & Ignition
+
+#### [NEW] [nexus-core/src/distiller.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/distiller.rs)
+ANE distiller adapted to real mlx-rs API (no `Device::ANE` or `topk` — will use manual argsort + gather).
+
+#### [NEW] [nexus-core/src/main.rs](file:///Users/kaizenpro/Desktop/aether_nexus/nexus-core/src/main.rs)
+Ignition sequence: mmap boot → Cortex boot → cognitive loop.
+
+---
+
+### Phase 6 – Bundle Script & README
+
+#### [NEW] [scripts/bundle.rs](file:///Users/kaizenpro/Desktop/aether_nexus/scripts/bundle.rs)
+Standalone binary for genesis `.aether` file creation with Ed25519 signing.
+
+#### [NEW] [README.md](file:///Users/kaizenpro/Desktop/aether_nexus/README.md)
+Project overview, build instructions, architecture diagram.
+
+#### [NEW] [.gitignore](file:///Users/kaizenpro/Desktop/aether_nexus/.gitignore)
+Update to ignore `.aether` files, `target/`, etc.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+1. **Compilation check**: `cargo check --workspace` — all types, traits, and modules must resolve
+2. **Unit tests** for `SparseCode` Pod/Zeroable guarantees: `cargo test -p nexus-core`
+3. **Metal shader compilation**: `build.rs` must successfully produce `weaver.metallib` (requires Xcode + Metal SDK)
+
+### Manual Verification
+1. Verify `SparseCode` is exactly 16 bytes via `std::mem::size_of::<SparseCode>()` assert in tests
+2. Verify `Fabric` alignment is 16384 via `std::mem::align_of::<Fabric<Llama8B>>()` assert in tests
+3. Run `cargo doc --workspace --no-deps` and verify documentation renders correctly
+
+> [!NOTE]
+> The Metal kernel and full mlx-rs integration will require an M1+ Mac with Xcode 16.2+. The Rust type system and module structure can be verified on any platform.
