@@ -6,6 +6,13 @@
 //! 3. Allocate GPU buffers for kernel inputs/outputs
 //! 4. Encode and dispatch the kernel
 //! 5. Read back the output token
+//!
+//! # Persistent Buffers
+//!
+//! All GPU input/output buffers are pre-allocated once at construction and reused
+//! for every `decode()` call. Data is copied into existing buffers via the
+//! shared-memory `contents()` pointer. Buffers are only reallocated if the
+//! input exceeds the pre-allocated capacity (rare growth path).
 
 use metal::{
     Buffer, CommandQueue, ComputePipelineState, Device, Library, MTLResourceOptions, MTLSize,
@@ -20,11 +27,32 @@ use half::f16 as F16;
 /// The Weaver Engine – GPU compute pipeline for the decode kernel.
 ///
 /// Created once at boot, reused for every decode step.
+/// Holds pre-allocated GPU buffers to avoid per-token buffer recreation.
 pub struct WeaverEngine {
     device: Device,
     queue: CommandQueue,
     pipeline: ComputePipelineState,
     _library: Library,
+
+    // ── Persistent GPU buffers ─────────────────────────────────────────────
+    // Pre-allocated once at construction, reused for every `decode()` call.
+    // Reallocated only when input exceeds the pre-allocated capacity (rare path).
+    buf_q_exact: Buffer,
+    buf_q_latent: Buffer,
+    buf_hot_pool: Buffer,
+    buf_cold_pool: Buffer,
+    buf_loom_refs: Buffer,
+    buf_output: Buffer,
+    buf_dictionary: Buffer,
+
+    /// Capacities (in bytes) of each persistent buffer.
+    cap_q_exact: u64,
+    cap_q_latent: u64,
+    cap_hot_pool: u64,
+    cap_cold_pool: u64,
+    cap_loom_refs: u64,
+    cap_output: u64,
+    cap_dictionary: u64,
 }
 
 /// Result of a single decode step
@@ -34,7 +62,18 @@ pub struct DecodeOutput {
 }
 
 impl WeaverEngine {
+    /// Default initial capacities sized for Llama-8B worst case.
+    const INIT_Q_HEADS: u64 = 32;
+    const INIT_KV_HEADS: u64 = 8;
+    const INIT_HEAD_DIM: u64 = 128;
+    const INIT_DICT_SIZE: u64 = 512;
+    const INIT_MAX_HOT_TOKENS: u64 = 4096 * 16;
+    const INIT_MAX_COLD_TOKENS: u64 = 32768 * 16;
+    const INIT_MAX_TOTAL_BLOCKS: u64 = 4096 + 32768;
+
     /// Create a new WeaverEngine by loading the pre-compiled metallib.
+    ///
+    /// Pre-allocates persistent GPU buffers sized for typical workloads.
     ///
     /// # Arguments
     ///
@@ -44,26 +83,42 @@ impl WeaverEngine {
     ///
     /// Returns an error string if the Metal device, library, or pipeline creation fails.
     pub fn new(metallib_path: &str) -> Result<Self, String> {
-        // 1. Get the system default Metal device
         let device = Device::system_default()
             .ok_or_else(|| "No Metal device found (Apple Silicon required)".to_string())?;
 
-        // 2. Load the pre-compiled metallib
         let library = device.new_library_with_file(metallib_path)?;
 
-        // 3. Get the kernel function
         let function = library
             .get_function("weaver_decode", None)
             .map_err(|e| format!("Failed to load weaver_decode function: {}", e))?;
 
-        // 4. Create the compute pipeline state
         let pipeline = device
             .new_compute_pipeline_state_with_function(&function)?;
 
-        // 5. Create command queue
         let queue = device.new_command_queue();
 
+        // Pre-allocate persistent buffers
+        let opts = MTLResourceOptions::StorageModeShared;
+        let sc_size = std::mem::size_of::<SparseCode>() as u64;
+
+        let cap_q_exact    = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_q_latent   = Self::INIT_Q_HEADS * Self::INIT_DICT_SIZE * 2;
+        let cap_hot_pool   = Self::INIT_MAX_HOT_TOKENS * Self::INIT_KV_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_cold_pool  = Self::INIT_MAX_COLD_TOKENS * Self::INIT_KV_HEADS * sc_size;
+        let cap_loom_refs  = Self::INIT_MAX_TOTAL_BLOCKS * 4;
+        let cap_output     = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_dictionary = Self::INIT_KV_HEADS * Self::INIT_DICT_SIZE * Self::INIT_HEAD_DIM * 2;
+
         Ok(Self {
+            buf_q_exact:    device.new_buffer(cap_q_exact,    opts),
+            buf_q_latent:   device.new_buffer(cap_q_latent,   opts),
+            buf_hot_pool:   device.new_buffer(cap_hot_pool,   opts),
+            buf_cold_pool:  device.new_buffer(cap_cold_pool,  opts),
+            buf_loom_refs:  device.new_buffer(cap_loom_refs,  opts),
+            buf_output:     device.new_buffer(cap_output,     opts),
+            buf_dictionary: device.new_buffer(cap_dictionary, opts),
+            cap_q_exact, cap_q_latent, cap_hot_pool, cap_cold_pool,
+            cap_loom_refs, cap_output, cap_dictionary,
             device,
             queue,
             pipeline,
@@ -73,22 +128,11 @@ impl WeaverEngine {
 
     /// Decode one token using the Weaver kernel.
     ///
-    /// # Arguments
-    ///
-    /// All data must be pre-allocated and correctly sized:
-    /// - `q_exact`: Query vectors for hot path [q_heads * head_dim] f16
-    /// - `q_latent`: Query projected into dictionary space [q_heads * dict_size] f16
-    /// - `hot_pool`: Hot KV blocks [n_total_hot_tokens * kv_heads * head_dim] f16
-    /// - `cold_pool`: Cold SparseCode blocks [n_total_cold_tokens * kv_heads] SparseCode
-    /// - `loom_refs`: Block reference indices [hot_count + cold_count] u32
-    /// - `dictionary`: Learned dictionary [kv_heads * dict_size * head_dim] f16
-    /// - `params`: Kernel dispatch parameters
-    ///
-    /// # Returns
-    ///
-    /// The decoded output token as f16 values.
+    /// Data is copied into persistent GPU buffers via the shared-memory
+    /// `contents()` pointer. Buffers are only reallocated if the input
+    /// exceeds the pre-allocated capacity (rare path).
     pub fn decode(
-        &self,
+        &mut self,
         q_exact: &[F16],
         q_latent: &[F16],
         hot_pool: &[F16],
@@ -100,81 +144,73 @@ impl WeaverEngine {
         let q_heads = params.q_heads as usize;
         let head_dim = params.head_dim as usize;
         let output_size = q_heads * head_dim;
-
-        // Create GPU buffers
         let opts = MTLResourceOptions::StorageModeShared;
 
-        let buf_q_exact = self.create_buffer_f16(q_exact, opts);
-        let buf_q_latent = self.create_buffer_f16(q_latent, opts);
-        let buf_hot_pool = self.create_buffer_f16(hot_pool, opts);
-        let buf_cold_pool = self.create_buffer_sparse(cold_pool, opts);
-        let buf_loom_refs = self.create_buffer_u32(loom_refs, opts);
-        let buf_output = self.device.new_buffer(
-            (output_size * std::mem::size_of::<F16>()) as u64,
-            opts,
-        );
-        let buf_dictionary = self.create_buffer_f16(dictionary, opts);
+        // Copy input data into persistent buffers, reallocating only on overflow.
+        Self::fill_f16(&mut self.buf_q_exact,    &mut self.cap_q_exact,    q_exact,     &self.device, opts);
+        Self::fill_f16(&mut self.buf_q_latent,   &mut self.cap_q_latent,   q_latent,    &self.device, opts);
+        Self::fill_f16(&mut self.buf_hot_pool,   &mut self.cap_hot_pool,   hot_pool,    &self.device, opts);
+        Self::fill_sparse(&mut self.buf_cold_pool, &mut self.cap_cold_pool, cold_pool,  &self.device, opts);
+        Self::fill_u32(&mut self.buf_loom_refs,  &mut self.cap_loom_refs,  loom_refs,   &self.device, opts);
+        Self::fill_f16(&mut self.buf_dictionary, &mut self.cap_dictionary, dictionary,  &self.device, opts);
 
-        // Create command buffer and encoder
+        // Ensure output buffer is large enough
+        let output_bytes = (output_size * std::mem::size_of::<F16>()) as u64;
+        if output_bytes > self.cap_output {
+            self.buf_output = self.device.new_buffer(output_bytes, opts);
+            self.cap_output = output_bytes;
+        }
+
+        // Encode and dispatch
         let cmd_buf = self.queue.new_command_buffer();
         let encoder = cmd_buf.new_compute_command_encoder();
 
-        // Set pipeline
         encoder.set_compute_pipeline_state(&self.pipeline);
+        encoder.set_buffer(0, Some(&self.buf_q_exact),    0);
+        encoder.set_buffer(1, Some(&self.buf_q_latent),   0);
+        encoder.set_buffer(2, Some(&self.buf_hot_pool),   0);
+        encoder.set_buffer(3, Some(&self.buf_cold_pool),  0);
+        encoder.set_buffer(4, Some(&self.buf_loom_refs),  0);
+        encoder.set_buffer(5, Some(&self.buf_output),     0);
 
-        // Bind buffers (must match kernel signature)
-        encoder.set_buffer(0, Some(&buf_q_exact), 0);
-        encoder.set_buffer(1, Some(&buf_q_latent), 0);
-        encoder.set_buffer(2, Some(&buf_hot_pool), 0);
-        encoder.set_buffer(3, Some(&buf_cold_pool), 0);
-        encoder.set_buffer(4, Some(&buf_loom_refs), 0);
-        encoder.set_buffer(5, Some(&buf_output), 0);
-
-        // Bind params as constant buffer (buffer 6)
         let params_ptr = params as *const WeaverParams as *const c_void;
         let params_size = std::mem::size_of::<WeaverParams>() as u64;
         encoder.set_bytes(6, params_size, params_ptr);
+        encoder.set_buffer(7, Some(&self.buf_dictionary), 0);
 
-        // Bind dictionary (buffer 7)
-        encoder.set_buffer(7, Some(&buf_dictionary), 0);
-
-        // Dispatch: grid = (1, q_heads, 1), threadgroup = (32, 1, 1)
         let grid_size = MTLSize::new(1, q_heads as u64, 1);
         let threadgroup_size = MTLSize::new(32, 1, 1);
         encoder.dispatch_thread_groups(grid_size, threadgroup_size);
-
         encoder.end_encoding();
 
-        // Submit and wait
         cmd_buf.commit();
         cmd_buf.wait_until_completed();
 
-        // Read back output
-        let output_ptr = buf_output.contents() as *const F16;
+        // Read back from persistent output buffer
+        let output_ptr = self.buf_output.contents() as *const F16;
         let output_slice = unsafe { std::slice::from_raw_parts(output_ptr, output_size) };
-        let output_data = output_slice.to_vec();
 
-        Ok(DecodeOutput { data: output_data })
+        Ok(DecodeOutput { data: output_slice.to_vec() })
     }
 
-    // ─── Buffer creation helpers ─────────────────────────────────────────
+    // ─── Persistent buffer fill helpers ──────────────────────────────────
 
-    fn create_buffer_f16(&self, data: &[F16], opts: MTLResourceOptions) -> Buffer {
-        let ptr = data.as_ptr() as *const c_void;
-        let len = (data.len() * std::mem::size_of::<F16>()) as u64;
-        self.device.new_buffer_with_data(ptr, len, opts)
+    fn fill_f16(buf: &mut Buffer, cap: &mut u64, data: &[F16], dev: &Device, opts: MTLResourceOptions) {
+        let needed = (data.len() * 2) as u64;
+        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 
-    fn create_buffer_u32(&self, data: &[u32], opts: MTLResourceOptions) -> Buffer {
-        let ptr = data.as_ptr() as *const c_void;
-        let len = (data.len() * std::mem::size_of::<u32>()) as u64;
-        self.device.new_buffer_with_data(ptr, len, opts)
+    fn fill_u32(buf: &mut Buffer, cap: &mut u64, data: &[u32], dev: &Device, opts: MTLResourceOptions) {
+        let needed = (data.len() * 4) as u64;
+        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 
-    fn create_buffer_sparse(&self, data: &[SparseCode], opts: MTLResourceOptions) -> Buffer {
-        let ptr = data.as_ptr() as *const c_void;
-        let len = (data.len() * std::mem::size_of::<SparseCode>()) as u64;
-        self.device.new_buffer_with_data(ptr, len, opts)
+    fn fill_sparse(buf: &mut Buffer, cap: &mut u64, data: &[SparseCode], dev: &Device, opts: MTLResourceOptions) {
+        let needed = (data.len() * std::mem::size_of::<SparseCode>()) as u64;
+        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 
     /// Get the Metal device name
@@ -200,7 +236,6 @@ mod tests {
     /// Verify WeaverEngine can be created on Apple Silicon
     #[test]
     fn weaver_engine_creates_pipeline() {
-        // The metallib should be at the build output path
         let metallib_path = option_env!("WEAVER_METALLIB");
         if metallib_path.is_none() {
             eprintln!("WEAVER_METALLIB not set — skipping pipeline test (normal on CI)");
@@ -225,7 +260,7 @@ mod tests {
             return;
         }
 
-        let engine = WeaverEngine::new(metallib_path.unwrap()).unwrap();
+        let mut engine = WeaverEngine::new(metallib_path.unwrap()).unwrap();
 
         let q_heads: u32 = 32;
         let kv_heads: u32 = 8;
@@ -235,21 +270,12 @@ mod tests {
         let cold_count: u32 = 1;
         let block_size: u32 = 16;
 
-        // Create synthetic test data
         let one = F16::from_f32(1.0);
         let q_exact = vec![one; (q_heads * head_dim) as usize];
         let q_latent = vec![one; (q_heads * dict_size) as usize];
-
-        // Hot pool: 2 blocks × block_size × kv_heads × head_dim
         let hot_pool = vec![one; (hot_count * block_size * kv_heads * head_dim) as usize];
-
-        // Cold pool: 1 block × block_size × kv_heads
         let cold_codes = vec![SparseCode::zero(); (cold_count * block_size * kv_heads) as usize];
-
-        // Loom refs: indices for hot + cold blocks
         let loom_refs: Vec<u32> = (0..(hot_count + cold_count)).collect();
-
-        // Dictionary: kv_heads × dict_size × head_dim
         let dictionary = vec![one; (kv_heads * dict_size * head_dim) as usize];
 
         let params = WeaverParams {
@@ -266,13 +292,8 @@ mod tests {
         };
 
         let result = engine.decode(
-            &q_exact,
-            &q_latent,
-            &hot_pool,
-            &cold_codes,
-            &loom_refs,
-            &dictionary,
-            &params,
+            &q_exact, &q_latent, &hot_pool, &cold_codes,
+            &loom_refs, &dictionary, &params,
         );
 
         assert!(result.is_ok(), "Decode failed: {:?}", result.err());
@@ -280,7 +301,6 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output.data.len(), (q_heads * head_dim) as usize);
 
-        // With uniform inputs, output should be non-zero
         let has_nonzero = output.data.iter().any(|v| f32::from(*v) != 0.0);
         assert!(has_nonzero, "Output should contain non-zero values");
 

@@ -21,6 +21,8 @@ pub struct NexusConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,17 +60,70 @@ impl Default for NexusConfig {
         Self {
             agent: AgentConfig::default(),
             memory: MemoryConfig::default(),
+            security: SecurityConfig::default(),
+        }
+    }
+}
+
+/// Security configuration for the sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Allowed workspace root directories. File operations are restricted to these.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
+    /// Allowed subprocess binary names (e.g. "cargo", "git").
+    #[serde(default = "SecurityConfig::default_commands")]
+    pub allowed_commands: Vec<String>,
+    /// Maximum subprocess execution timeout in milliseconds.
+    #[serde(default = "SecurityConfig::default_timeout")]
+    pub max_subprocess_timeout_ms: u64,
+    /// Wasmtime fuel limit per WASM execution.
+    #[serde(default = "SecurityConfig::default_fuel")]
+    pub wasm_fuel: u64,
+    /// Wasmtime memory page limit (64 KB per page).
+    #[serde(default = "SecurityConfig::default_memory_pages")]
+    pub wasm_memory_pages: u32,
+}
+
+impl SecurityConfig {
+    fn default_commands() -> Vec<String> {
+        vec![
+            "cargo".into(), "git".into(), "ls".into(), "cat".into(),
+            "head".into(), "tail".into(), "find".into(), "grep".into(),
+            "wc".into(), "echo".into(), "mkdir".into(), "rustfmt".into(),
+        ]
+    }
+    fn default_timeout() -> u64 { 30_000 }
+    fn default_fuel() -> u64 { 1_000_000 }
+    fn default_memory_pages() -> u32 { 256 }
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            workspace_roots: Vec::new(),
+            allowed_commands: Self::default_commands(),
+            max_subprocess_timeout_ms: Self::default_timeout(),
+            wasm_fuel: Self::default_fuel(),
+            wasm_memory_pages: Self::default_memory_pages(),
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Model Dimensions (Llama-3.1-8B defaults)
+// Model Dimensions (Dual-System Architecture)
+//
+// System 1 (fast reflex):  Qwen 2.5 0.5B Instruct
+// System 2 (deep reason):  DeepSeek-R1-Distill-Qwen 1.5B
+// Legacy:                  Granite 3.0 2B, Llama 3.1 8B
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Trait defining the model's tensor dimensions.
 ///
-/// Default values correspond to Llama-3.1-8B architecture.
+/// Default values correspond to Llama-3.1-8B architecture (used for
+/// Fabric layout sizing when no specific model is specified). The actual
+/// inference models are configured via `InferenceConfig::detect_from_dir()`.
+///
 /// Override for different model geometries.
 pub trait ModelDims: Send + Sync + 'static {
     const LAYERS: usize = 32;
@@ -86,7 +141,7 @@ pub trait ModelDims: Send + Sync + 'static {
     const GQA_GROUP: usize = Self::Q_HEADS / Self::KV_HEADS;
 }
 
-/// Llama-3.1-8B concrete dimensions (all defaults)
+/// Llama-3.1-8B concrete dimensions (used for default Fabric layout)
 pub struct Llama8B;
 impl ModelDims for Llama8B {}
 
@@ -102,6 +157,30 @@ impl ModelDims for Granite2B {
     const VOCAB_SIZE: usize = 49155;
 }
 
+/// Qwen 2.5 0.5B Instruct concrete dimensions (System 1 – fast reflex)
+pub struct Qwen05B;
+impl ModelDims for Qwen05B {
+    const LAYERS: usize = 24;
+    const Q_HEADS: usize = 14;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 64;     // 896 / 14 = 64
+    const HIDDEN_SIZE: usize = 896;
+    const INTERMEDIATE_SIZE: usize = 4864;
+    const VOCAB_SIZE: usize = 151936;
+}
+
+/// DeepSeek-R1-Distill-Qwen 1.5B concrete dimensions (System 2 – deep reasoning)
+pub struct DeepSeekR1_1_5B;
+impl ModelDims for DeepSeekR1_1_5B {
+    const LAYERS: usize = 28;
+    const Q_HEADS: usize = 12;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 128;    // 1536 / 12 = 128
+    const HIDDEN_SIZE: usize = 1536;
+    const INTERMEDIATE_SIZE: usize = 8960;
+    const VOCAB_SIZE: usize = 151936;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SparseCode – Atomic Unit of Cold Memory
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,10 +191,10 @@ impl ModelDims for Granite2B {
 /// 4 dictionary indices (0..511) + 4 learned coefficients.
 ///
 /// # Invariants
-/// - `#[repr(C, packed)]` ensures no padding → exactly `4*2 + 4*2 = 16` bytes
+/// - `#[repr(C)]` ensures no padding → exactly `4*2 + 4*2 = 16` bytes
 /// - `Pod + Zeroable` enables zero-copy reinterpretation from mmap'd memory
-#[repr(C, packed)]
-#[derive(Copy, Clone)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SparseCode {
     /// Dictionary indices (each in range 0..DICT_SIZE)
     pub indices: [u16; 4],
@@ -123,10 +202,10 @@ pub struct SparseCode {
     pub coeffs: [f16; 4],
 }
 
-// Safety: SparseCode is #[repr(C, packed)], contains only Copy types (u16, f16),
-// has no padding, and every bit pattern is valid. This satisfies Pod + Zeroable.
-unsafe impl Zeroable for SparseCode {}
-unsafe impl Pod for SparseCode {}
+const _: () = assert!(std::mem::size_of::<SparseCode>() == 16);
+const _: () = assert!(std::mem::align_of::<SparseCode>() == 2);
+
+
 
 impl SparseCode {
     /// Create a zeroed SparseCode (all indices 0, all coefficients 0.0)
@@ -144,17 +223,7 @@ impl Default for SparseCode {
     }
 }
 
-impl core::fmt::Debug for SparseCode {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Must read packed fields via copy to avoid UB
-        let indices = self.indices;
-        let coeffs = self.coeffs;
-        f.debug_struct("SparseCode")
-            .field("indices", &indices)
-            .field("coeffs", &coeffs.map(|c| f32::from(c)))
-            .finish()
-    }
-}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Capability IDs – Exhaustive, typed dispatch
@@ -339,6 +408,9 @@ pub enum CortexError {
     #[error("result slice out of bounds: offset={offset}, size={size}")]
     ResultOutOfBounds { offset: usize, size: usize },
 
+    #[error("sandbox violation: {0}")]
+    SandboxViolation(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -368,8 +440,11 @@ pub enum FabricError {
     #[error("version mismatch: expected {expected:#010x}, got {actual:#010x}")]
     VersionMismatch { expected: u32, actual: u32 },
 
-    #[error("WAL persistence failed: {0}")]
-    WalFailed(String),
+    #[error("checkpoint flush failed: {0}")]
+    CheckpointFailed(String),
+
+    #[error("layout mismatch: {0}")]
+    LayoutMismatch(String),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -389,7 +464,11 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const MAX_RESULT_SIZE: usize = 4096;
 
 /// WAL flush interval (milliseconds)
-pub const WAL_INTERVAL_MS: u64 = 300;
+/// Checkpoint flush interval in milliseconds.
+///
+/// NOTE: This is NOT a write-ahead log. The "WAL" name was misleading.
+/// This is a periodic mmap flush that does not provide atomicity.
+pub const CHECKPOINT_INTERVAL_MS: u64 = 300;
 
 /// Distiller REM cycle interval (seconds)
 pub const REM_INTERVAL_SECS: u64 = 30;
@@ -442,10 +521,10 @@ mod tests {
         );
     }
 
-    /// Verify SparseCode alignment (packed → align 1)
+    /// Verify SparseCode alignment (repr(C) → align 2)
     #[test]
     fn sparse_code_alignment() {
-        assert_eq!(std::mem::align_of::<SparseCode>(), 1);
+        assert_eq!(std::mem::align_of::<SparseCode>(), 2);
     }
 
     /// Verify default SparseCode is all zeroes
@@ -471,10 +550,7 @@ mod tests {
         let bytes = bytemuck::bytes_of(&original);
         assert_eq!(bytes.len(), 16);
         let recovered: &SparseCode = bytemuck::from_bytes(bytes);
-        // Must copy packed fields to locals to avoid misaligned reference UB
-        let rec_indices = recovered.indices;
-        let orig_indices = original.indices;
-        assert_eq!(rec_indices, orig_indices);
+        assert_eq!(recovered.indices, original.indices);
     }
 
     /// WeaverParams must be Pod + Zeroable

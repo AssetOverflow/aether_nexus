@@ -6,7 +6,7 @@
 use crate::ops::OpsEngine;
 use crate::weight_loader::ModelWeights;
 use crate::tokenizer::Tokenizer;
-use half::f16 as F16;
+// half::f16 as F16 removed — scaling is now GPU-side via scale_f16 kernel
 use metal::Buffer;
 
 /// Configuration for the inference engine.
@@ -162,6 +162,7 @@ pub struct InferenceEngine {
     // KV caches per layer
     kv_caches: Vec<KvCache>,
     // Workspace buffers to avoid reallocation
+    ws_token: Buffer,
     ws_hidden: Buffer,
     ws_norm: Buffer,
     ws_q: Buffer,
@@ -202,6 +203,10 @@ struct LayerBuffers {
 }
 
 impl InferenceEngine {
+    /// Maximum sequence length for KV cache allocation.
+    /// Beyond this, `forward_one_token` returns an error.
+    pub const MAX_SEQ_LEN: usize = 4096;
+
     /// Create an inference engine, uploading all weights to GPU.
     pub fn new(
         ops: OpsEngine,
@@ -235,8 +240,8 @@ impl InferenceEngine {
             });
         }
 
-        // Allocate KV caches (max 4096 tokens)
-        let max_seq = 4096u64;
+        // Allocate KV caches
+        let max_seq = Self::MAX_SEQ_LEN as u64;
         let kv_dim = (config.kv_heads * config.head_dim) as u64;
         let cache_size = max_seq * kv_dim * 2; // f16 = 2 bytes
 
@@ -258,6 +263,7 @@ impl InferenceEngine {
         let inter = config.intermediate_size as u64;
         let vocab = config.vocab_size as u64;
 
+        let ws_token = ops.buffer_empty(4); // 1 u32 token
         let ws_hidden = ops.buffer_empty(h * 2);
         let ws_norm = ops.buffer_empty(h * 2);
         let ws_q = ops.buffer_empty(q_h * hd * 2);
@@ -284,6 +290,7 @@ impl InferenceEngine {
             buf_final_norm,
             layer_bufs,
             kv_caches,
+            ws_token,
             ws_hidden,
             ws_norm,
             ws_q,
@@ -426,6 +433,19 @@ impl InferenceEngine {
         h: u32, q_h: u32, kv_h: u32, hd: u32, inter: u32,
     ) -> Result<u32, String> {
         let pos = self.position;
+
+        // ── KV cache bounds guard ────────────────────────────────────────
+        // The KV cache is pre-allocated for MAX_SEQ_LEN tokens.
+        // If we've exhausted the cache, bail early with a clear error
+        // rather than silently writing out-of-bounds on the GPU.
+        if pos as usize >= Self::MAX_SEQ_LEN {
+            return Err(format!(
+                "KV cache exhausted: position {} >= MAX_SEQ_LEN {}. \
+                 Call reset() or increase MAX_SEQ_LEN.",
+                pos, Self::MAX_SEQ_LEN
+            ));
+        }
+
         let kv_len = pos + 1;
         let kv_dim = kv_h * hd;
         let kv_elem_offset = pos * kv_dim; // element offset into KV cache (f16 elements)
@@ -436,25 +456,16 @@ impl InferenceEngine {
         self.ops.begin_batch();
 
         // 1. Embedding lookup
-        let token_buf = self.ops.buffer_u32(&[token_id]);
-        self.ops.embed_lookup(&token_buf, &self.buf_embed, &self.ws_hidden, h, 1);
+        // Update persistent token buffer instead of reallocating
+        unsafe {
+            *(self.ws_token.contents() as *mut u32) = token_id;
+        }
+        self.ops.embed_lookup(&self.ws_token, &self.buf_embed, &self.ws_hidden, h, 1);
 
         // Embedding multiplier (Granite-specific — skip for Qwen where multiplier == 1.0)
+        // Uses GPU-side scale_f16 kernel to avoid breaking the batch.
         if self.config.embedding_multiplier != 1.0 {
-            self.ops.end_batch();
-            let hidden_data = self.ops.read_f16(&self.ws_hidden, h as usize);
-            let scaled: Vec<F16> = hidden_data.iter()
-                .map(|v| F16::from_f32(v.to_f32() * self.config.embedding_multiplier))
-                .collect();
-            let scaled_buf = self.ops.buffer_f16(&scaled);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    scaled_buf.contents() as *const u8,
-                    self.ws_hidden.contents() as *mut u8,
-                    h as usize * 2,
-                );
-            }
-            self.ops.begin_batch();
+            self.ops.scale_f16(&self.ws_hidden, h, self.config.embedding_multiplier);
         }
 
         // 2. Transformer layers — ALL on GPU, no CPU round-trips
@@ -503,22 +514,10 @@ impl InferenceEngine {
             // Output projection
             self.ops.matmul(&self.ws_attn_out, &lb.o_proj, &self.ws_proj, 1, h, q_h * hd);
 
-            // Residual multiplier (Granite-specific)
+            // Residual multiplier for attention path (Granite-specific)
+            // Uses GPU-side scale_f16 kernel — no sync point needed.
             if self.config.residual_multiplier != 1.0 {
-                self.ops.end_batch();
-                let proj_data = self.ops.read_f16(&self.ws_proj, h as usize);
-                let scaled: Vec<F16> = proj_data.iter()
-                    .map(|v| F16::from_f32(v.to_f32() * self.config.residual_multiplier))
-                    .collect();
-                let scaled_buf = self.ops.buffer_f16(&scaled);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        scaled_buf.contents() as *const u8,
-                        self.ws_proj.contents() as *mut u8,
-                        h as usize * 2,
-                    );
-                }
-                self.ops.begin_batch();
+                self.ops.scale_f16(&self.ws_proj, h, self.config.residual_multiplier);
             }
 
             // hidden = residual + proj (add_residual is in-place: ws_hidden += ws_proj)
@@ -542,22 +541,10 @@ impl InferenceEngine {
             self.ops.silu_gate(&self.ws_gate, &self.ws_up, &self.ws_ffn, inter);
             self.ops.matmul(&self.ws_ffn, &lb.down_proj, &self.ws_down, 1, h, inter);
 
-            // Residual multiplier (Granite-specific)
+            // Residual multiplier for FFN path (Granite-specific)
+            // Uses GPU-side scale_f16 kernel — no sync point needed.
             if self.config.residual_multiplier != 1.0 {
-                self.ops.end_batch();
-                let down_data = self.ops.read_f16(&self.ws_down, h as usize);
-                let scaled: Vec<F16> = down_data.iter()
-                    .map(|v| F16::from_f32(v.to_f32() * self.config.residual_multiplier))
-                    .collect();
-                let scaled_buf = self.ops.buffer_f16(&scaled);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        scaled_buf.contents() as *const u8,
-                        self.ws_down.contents() as *mut u8,
-                        h as usize * 2,
-                    );
-                }
-                self.ops.begin_batch();
+                self.ops.scale_f16(&self.ws_down, h, self.config.residual_multiplier);
             }
 
             // hidden = residual + down
@@ -660,8 +647,16 @@ fn sample_token_advanced(
     let sum: f32 = exp_vals.iter().sum();
     let probs: Vec<f32> = exp_vals.iter().map(|&x| x / sum).collect();
 
-    // Sort by probability (descending) for top-p selection
+    // Extract top-K candidates in O(N) then sort just the top-K to avoid O(N log N) on full vocab
     let mut indexed: Vec<(usize, f32)> = probs.iter().enumerate().map(|(i, &p)| (i, p)).collect();
+    const TOP_K: usize = 50;
+    let k = TOP_K.min(indexed.len());
+    if k < indexed.len() {
+        // Partition array so the top K are at the beginning (in random order)
+        indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed.truncate(k);
+    }
+    // Now sort only the top K (descending)
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     // Find top-p cutoff

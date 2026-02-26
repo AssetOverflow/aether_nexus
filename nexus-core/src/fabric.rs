@@ -14,8 +14,9 @@
 //!
 //! - The entire Fabric occupies a single contiguous mmap region
 //! - All sub-regions are accessed via byte-offset slicing (zero-copy)
-//! - Ed25519 signature verification on boot
-//! - WAL flush every 300ms for persistence
+//! - Ed25519 signature verification on boot (opt-in via BootMode)
+//! - Checkpoint flush every 300ms for persistence (periodic mmap flush,
+//!   NOT a write-ahead log — no atomicity or crash-consistency guarantees)
 //!
 //! # Architecture
 //!
@@ -31,11 +32,35 @@ use std::time::{Duration, Instant};
 
 use memmap2::MmapMut;
 use ring::signature;
+use half::f16;
 
 use crate::types::{
     FabricError, FabricLayout, LoomDescriptor, ModelDims, Persona, SparseCode,
-    HEADER_MAGIC, FORMAT_VERSION, SIGNATURE_LEN, WAL_INTERVAL_MS,
+    HEADER_MAGIC, FORMAT_VERSION, SIGNATURE_LEN, CHECKPOINT_INTERVAL_MS,
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot Mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Controls whether signature verification is enforced at boot.
+///
+/// In development workflows, genesis keys are often ephemeral (generated fresh
+/// each time), making verification impossible. This enum makes the decision
+/// explicit rather than silently skipping verification.
+#[derive(Debug, Clone)]
+pub enum BootMode {
+    /// Development mode: skip signature verification.
+    /// Prints a visible warning at boot.
+    Dev,
+    /// Production mode: verify the `.aether` file signature against this
+    /// public key. Fails hard with `FabricError::SignatureInvalid` if
+    /// verification fails.
+    Verified {
+        /// The 32-byte Ed25519 public key to verify against.
+        public_key: [u8; 32],
+    },
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fabric Region Offsets
@@ -99,10 +124,9 @@ impl FabricRegions {
     pub fn compute<D: ModelDims>() -> Self {
         let header_size = FabricLayout::HEADER_SIZE;
 
-        // Weights: approximate allocation (actual size depends on model format)
-        // For Llama-3.1-8B in f16: ~16GB, but we allow configuration
+        // Weights: approximate allocation based on ModelDims
         let weights_offset = align_up(header_size, 16384);
-        let weights_size = 6 * 1024 * 1024 * 1024; // 6 GB default for f16 weights
+        let weights_size = align_up(Self::estimated_weight_bytes::<D>(), 16384);
 
         // Hot KV Pool: [MAX_HOT_BLOCKS * BLOCK_SIZE * KV_HEADS * HEAD_DIM * 2 bytes (f16)]
         let hot_pool_offset = align_up(weights_offset + weights_size, 16384);
@@ -163,6 +187,32 @@ impl FabricRegions {
             total_size,
         }
     }
+
+    /// Approximate weight storage: all projection matrices + embeddings + norms.
+    /// formula: 2 * hidden * (4*hidden + 2*kv_ratio*hidden + intermediate + vocab + layers*norms)
+    fn estimated_weight_bytes<D: ModelDims>() -> usize {
+        let h = D::HIDDEN_SIZE;
+        let inter = D::INTERMEDIATE_SIZE;
+        let vocab = D::VOCAB_SIZE;
+        let layers = D::LAYERS;
+        let kv_h = D::KV_HEADS;
+        let q_h = D::Q_HEADS;
+        let hd = D::HEAD_DIM;
+        
+        let per_layer = 2 * (
+            q_h * hd * h      // q_proj
+            + kv_h * hd * h   // k_proj
+            + kv_h * hd * h   // v_proj
+            + q_h * hd * h    // o_proj
+            + h * inter       // gate_proj
+            + h * inter       // up_proj
+            + inter * h       // down_proj
+            + h               // input_layernorm
+            + h               // post_attention_layernorm
+        );
+        let global = 2 * (vocab * h + h); // embed_tokens + final_norm
+        layers * per_layer + global
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +230,7 @@ impl FabricRegions {
 /// the Cortex during dispatch) and the trace log. All other regions are
 /// read-only after boot.
 pub struct Fabric<D: ModelDims> {
-    /// The mmap'd .aether file (mutable for WAL + observation writes)
+    /// The mmap'd .aether file (mutable for checkpoint + observation writes)
     mmap: MmapMut,
 
     /// Computed region offsets
@@ -189,11 +239,11 @@ pub struct Fabric<D: ModelDims> {
     /// Parsed Loom descriptors (in-memory working copies)
     pub looms: [LoomDescriptor; 4],
 
-    /// Whether the Fabric has been modified since last WAL flush
+    /// Whether the Fabric has been modified since last checkpoint flush
     dirty: AtomicBool,
 
-    /// Last WAL flush timestamp
-    last_wal: std::sync::Mutex<Instant>,
+    /// Last checkpoint flush timestamp
+    last_checkpoint: std::sync::Mutex<Instant>,
 
     /// Type witness (zero-sized, erased at runtime)
     _dims: std::marker::PhantomData<D>,
@@ -205,18 +255,23 @@ impl<D: ModelDims> Fabric<D> {
     /// This is the organism's ignition sequence:
     /// 1. Open and mmap the file
     /// 2. Verify magic bytes and version
-    /// 3. Verify Ed25519 signature (optional, skipped if no key provided)
+    /// 3. Optionally verify Ed25519 signature (based on `BootMode`)
     /// 4. Compute region offsets
     /// 5. Parse Loom descriptors
     ///
     /// # Errors
     ///
     /// Returns `FabricError` if the file is invalid, too small, or fails
-    /// signature verification.
+    /// signature verification (in `Verified` mode).
     pub fn boot(path: &str) -> Result<Self, FabricError> {
+        Self::boot_with_mode(path, BootMode::Dev)
+    }
+
+    /// Boot the Fabric with explicit signature verification control.
+    pub fn boot_with_mode(path: &str, mode: BootMode) -> Result<Self, FabricError> {
         let path = Path::new(path);
 
-        // Open for read+write (WAL writes)
+        // Open for read+write (checkpoint writes)
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -253,6 +308,29 @@ impl<D: ModelDims> Fabric<D> {
             });
         }
 
+        // Signature verification based on BootMode
+        match &mode {
+            BootMode::Dev => {
+                eprintln!("[WARN] Booting in DEV mode — signature verification SKIPPED");
+            }
+            BootMode::Verified { public_key } => {
+                let data_end = regions.total_size - SIGNATURE_LEN;
+                let sig_start = data_end;
+                let sig_end = data_end + SIGNATURE_LEN;
+
+                let public_key = signature::UnparsedPublicKey::new(
+                    &signature::ED25519,
+                    public_key,
+                );
+
+                public_key
+                    .verify(&mmap[..data_end], &mmap[sig_start..sig_end])
+                    .map_err(|_| FabricError::SignatureInvalid)?;
+
+                println!("[BOOT] Ed25519 signature verified ✓");
+            }
+        }
+
         // Parse Loom descriptors from the mmap
         let looms = Self::parse_looms(&mmap, &regions);
 
@@ -261,7 +339,7 @@ impl<D: ModelDims> Fabric<D> {
             regions,
             looms,
             dirty: AtomicBool::new(false),
-            last_wal: std::sync::Mutex::new(Instant::now()),
+            last_checkpoint: std::sync::Mutex::new(Instant::now()),
             _dims: std::marker::PhantomData,
         })
     }
@@ -271,6 +349,12 @@ impl<D: ModelDims> Fabric<D> {
     /// Read-only view of the model weights region
     pub fn weights(&self) -> &[u8] {
         &self.mmap[self.regions.weights_offset..self.regions.weights_offset + self.regions.weights_size]
+    }
+
+    /// Read-only view of the model weights region as f16
+    pub fn weight_region_as_f16(&self) -> &[f16] {
+        let bytes = self.weights();
+        bytemuck::cast_slice(bytes)
     }
 
     /// Read-only view of the hot KV pool
@@ -334,8 +418,7 @@ impl<D: ModelDims> Fabric<D> {
         let end = start + self.regions.trace_size;
         &mut self.mmap[start..end]
     }
-
-    // ─── Persistence (WAL) ───────────────────────────────────────────────
+    // ─── Holographic Trace ────────────────────────────────────────────────
 
     /// Append a structured trajectory record to the Holographic Trace ring buffer.
     pub fn append_trace(&mut self, record: &str) {
@@ -364,25 +447,33 @@ impl<D: ModelDims> Fabric<D> {
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// Flush dirty pages to disk if the WAL interval has elapsed.
+    // ─── Persistence (Checkpoint) ────────────────────────────────────────
+    //
+    // NOTE: This is a periodic mmap flush, NOT a write-ahead log.
+    // It does not provide atomicity or crash-consistency guarantees.
+    // A crash during flush may leave the .aether file in a partially
+    // updated state. For true durability, a proper WAL or snapshot
+    // mechanism would be needed.
+
+    /// Flush dirty pages to disk if the checkpoint interval has elapsed.
     ///
     /// Called at the end of each cognitive cycle. Only flushes if:
     /// 1. The Fabric has been modified (dirty flag)
-    /// 2. At least WAL_INTERVAL_MS has elapsed since last flush
-    pub fn persist(&mut self) -> Result<(), FabricError> {
+    /// 2. At least CHECKPOINT_INTERVAL_MS has elapsed since last flush
+    pub fn checkpoint(&mut self) -> Result<(), FabricError> {
         if !self.dirty.load(Ordering::Acquire) {
             return Ok(());
         }
 
-        let mut last = self.last_wal.lock().unwrap();
-        if last.elapsed() < Duration::from_millis(WAL_INTERVAL_MS) {
+        let mut last = self.last_checkpoint.lock().unwrap();
+        if last.elapsed() < Duration::from_millis(CHECKPOINT_INTERVAL_MS) {
             return Ok(());
         }
 
         // Flush the mmap to disk (async flush for performance)
         self.mmap
             .flush_async()
-            .map_err(|e| FabricError::WalFailed(e.to_string()))?;
+            .map_err(|e| FabricError::CheckpointFailed(e.to_string()))?;
 
         self.dirty.store(false, Ordering::Release);
         *last = Instant::now();
@@ -391,12 +482,12 @@ impl<D: ModelDims> Fabric<D> {
     }
 
     /// Force an immediate synchronous flush (for shutdown)
-    pub fn force_persist(&mut self) -> Result<(), FabricError> {
+    pub fn force_checkpoint(&mut self) -> Result<(), FabricError> {
         self.mmap
             .flush()
-            .map_err(|e| FabricError::WalFailed(e.to_string()))?;
+            .map_err(|e| FabricError::CheckpointFailed(e.to_string()))?;
         self.dirty.store(false, Ordering::Release);
-        *self.last_wal.lock().unwrap() = Instant::now();
+        *self.last_checkpoint.lock().unwrap() = Instant::now();
         Ok(())
     }
 
@@ -469,6 +560,112 @@ impl<D: ModelDims> Fabric<D> {
     pub fn raw_bytes(&self) -> &[u8] {
         &self.mmap
     }
+
+    // ─── Weight Embedding ────────────────────────────────────────────────
+    //
+    // The weights region stores model tensors in a self-describing format:
+    //
+    //   [4 bytes: WEIGHT_MAGIC "WGHT"]
+    //   [4 bytes: num_layers (u32 LE)]
+    //   [4 bytes: flags (u32 LE) — bit 0 = has_qkv_biases]
+    //   [padding to 64-byte boundary]
+    //   [tensor data: embed_tokens | layer[0..N] | final_norm | lm_head]
+    //
+    // Each layer's tensors are concatenated in fixed order:
+    //   q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj,
+    //   input_layernorm, post_attention_layernorm, [q_bias, k_bias, v_bias]
+    //
+    // All tensors are f16 (2 bytes per element), stored contiguously.
+    // Since tensor sizes are deterministic from InferenceConfig, no per-tensor
+    // size headers are needed — offsets can be recomputed at load time.
+
+    /// Magic bytes at the start of the weights region indicating weights are embedded.
+    const WEIGHT_MAGIC: [u8; 4] = *b"WGHT";
+
+    /// Header size for the weight manifest (aligned to 64 bytes).
+    const WEIGHT_HEADER_SIZE: usize = 64;
+
+    /// Check whether model weights have been embedded into this Fabric.
+    pub fn weights_embedded(&self) -> bool {
+        let w = self.weights();
+        w.len() >= 4 && w[..4] == Self::WEIGHT_MAGIC
+    }
+
+    /// Read the weight manifest header. Returns (num_layers, has_biases).
+    pub fn weight_manifest(&self) -> Option<(usize, bool)> {
+        let w = self.weights();
+        if w.len() < Self::WEIGHT_HEADER_SIZE || w[..4] != Self::WEIGHT_MAGIC {
+            return None;
+        }
+        let num_layers = u32::from_le_bytes([w[4], w[5], w[6], w[7]]) as usize;
+        let flags = u32::from_le_bytes([w[8], w[9], w[10], w[11]]);
+        let has_biases = (flags & 1) != 0;
+        Some((num_layers, has_biases))
+    }
+
+    /// Raw access to the weight data region (after the header).
+    /// Returns the slice starting at the weight header boundary.
+    pub fn weight_data(&self) -> &[u8] {
+        let w = self.weights();
+        if w.len() <= Self::WEIGHT_HEADER_SIZE {
+            return &[];
+        }
+        &w[Self::WEIGHT_HEADER_SIZE..]
+    }
+
+    /// Embed model weights into the Fabric's weights region (mutable).
+    ///
+    /// This is called during bundling (genesis + weight embedding) to write
+    /// all model tensors into the `.aether` file. After this, the `models/**`
+    /// directory is no longer needed at runtime.
+    ///
+    /// # Arguments
+    /// - `weight_bytes`: All tensors concatenated as raw f16 bytes in the
+    ///   canonical order (embed, layers, norm, lm_head)
+    /// - `num_layers`: Number of transformer layers
+    /// - `has_biases`: Whether QKV biases are included per layer
+    pub fn embed_weights(
+        &mut self,
+        weight_bytes: &[u8],
+        num_layers: usize,
+        has_biases: bool,
+    ) -> Result<(), FabricError> {
+        let header_plus_data = Self::WEIGHT_HEADER_SIZE + weight_bytes.len();
+        if header_plus_data > self.regions.weights_size {
+            return Err(FabricError::LayoutMismatch(format!(
+                "Weight data ({} bytes) + header exceeds weights region ({} bytes)",
+                weight_bytes.len(), self.regions.weights_size
+            )));
+        }
+
+        let base = self.regions.weights_offset;
+
+        // Write magic
+        self.mmap[base..base + 4].copy_from_slice(&Self::WEIGHT_MAGIC);
+
+        // Write num_layers
+        self.mmap[base + 4..base + 8].copy_from_slice(&(num_layers as u32).to_le_bytes());
+
+        // Write flags
+        let flags: u32 = if has_biases { 1 } else { 0 };
+        self.mmap[base + 8..base + 12].copy_from_slice(&flags.to_le_bytes());
+
+        // Zero remaining header
+        for b in &mut self.mmap[base + 12..base + Self::WEIGHT_HEADER_SIZE] {
+            *b = 0;
+        }
+
+        // Write tensor data
+        let data_start = base + Self::WEIGHT_HEADER_SIZE;
+        self.mmap[data_start..data_start + weight_bytes.len()]
+            .copy_from_slice(weight_bytes);
+
+        self.dirty.store(true, Ordering::Release);
+        println!("[FABRIC] Embedded {} bytes of weights ({} layers, biases={})",
+            weight_bytes.len(), num_layers, has_biases);
+
+        Ok(())
+    }
 }
 
 /// Helper: read a u32 in little-endian from a byte slice
@@ -535,7 +732,7 @@ pub fn create_genesis<D: ModelDims>(
     mmap[data_end..data_end + sig_bytes.len()].copy_from_slice(sig_bytes);
 
     // Flush to disk
-    mmap.flush().map_err(|e| FabricError::WalFailed(e.to_string()))?;
+    mmap.flush().map_err(|e| FabricError::CheckpointFailed(e.to_string()))?;
 
     Ok(())
 }

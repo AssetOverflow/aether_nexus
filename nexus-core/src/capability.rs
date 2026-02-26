@@ -11,6 +11,7 @@
 //! - Dispatch is type-safe: `fabric_view` is lifetime-bound to the call
 //! - Results are written into pre-allocated observation buffer slices
 
+use crate::sandbox::SandboxPolicy;
 use crate::types::{CapabilityId, CortexError};
 use bytemuck::{Pod, Zeroable};
 
@@ -20,7 +21,7 @@ use bytemuck::{Pod, Zeroable};
 /// The trait enforces:
 /// - Fixed, `Pod`-compatible argument and result types (zero-copy serialization)
 /// - A unique `CapabilityId` for dispatch
-/// - A pure `execute` function that takes args and a mutable fabric view
+/// - A pure `execute` function that takes args, buffers, and a sandbox policy
 ///
 /// # Example
 ///
@@ -32,7 +33,7 @@ use bytemuck::{Pod, Zeroable};
 ///     type Result = VectorSearchResult;
 ///     const ID: CapabilityId = CapabilityId::VectorSearch;
 ///
-///     fn execute(args: Self::Args, fabric_view: &mut [u8]) -> Result<Self::Result, CortexError> {
+///     fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
 ///         // Perform semantic search via MLX matmul
 ///         Ok(VectorSearchResult { ... })
 ///     }
@@ -53,27 +54,29 @@ pub trait Capability: Send + Sync + 'static {
     /// - `args`: Deserialized from the Fabric's argument region
     /// - `arg_buf`: Read-only slice of the Fabric's argument region (for dynamic sized args like strings)
     /// - `res_buf`: Mutable slice of the observation buffer for writes
+    /// - `policy`: The sandbox policy for security validation
     ///
     /// # Returns
     ///
     /// The result to be written back into the Fabric, or a `CortexError`.
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8]) -> Result<Self::Result, CortexError>;
+    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError>;
 }
 
 /// Type-erased handler function signature used in the Cortex dispatch map.
 ///
-/// Takes raw byte slices for args and results, performs internal Pod casts.
+/// Takes raw byte slices for args and results, plus the sandbox policy,
+/// and performs internal Pod casts.
 pub type HandlerFn =
-    Box<dyn Fn(&[u8], &mut [u8]) -> Result<(), CortexError> + Send + Sync>;
+    Box<dyn Fn(&[u8], &mut [u8], &SandboxPolicy) -> Result<(), CortexError> + Send + Sync>;
 
 /// Generate a type-erased handler from a `Capability` implementor.
 ///
 /// This function creates a closure that:
 /// 1. Casts the arg bytes to the capability's Args type via `bytemuck`
-/// 2. Calls `execute`
+/// 2. Calls `execute` with the sandbox policy
 /// 3. Casts the result back to bytes and writes to the result slice
 pub fn make_handler<C: Capability>() -> HandlerFn {
-    Box::new(|arg_bytes: &[u8], res_bytes: &mut [u8]| {
+    Box::new(|arg_bytes: &[u8], res_bytes: &mut [u8], policy: &SandboxPolicy| {
         // Validate arg size
         let arg_size = std::mem::size_of::<C::Args>();
         if arg_bytes.len() < arg_size {
@@ -86,8 +89,8 @@ pub fn make_handler<C: Capability>() -> HandlerFn {
         // Zero-copy cast from bytes → Args
         let args: &C::Args = bytemuck::from_bytes(&arg_bytes[..arg_size]);
 
-        // Execute the capability
-        let result = C::execute(*args, arg_bytes, res_bytes)?;
+        // Execute the capability with sandbox policy
+        let result = C::execute(*args, arg_bytes, res_bytes, policy)?;
 
         // Write result back to result slice
         let result_bytes = bytemuck::bytes_of(&result);

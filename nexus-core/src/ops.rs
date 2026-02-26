@@ -35,7 +35,8 @@ impl OpsEngine {
             "copy_buffer",
             "embed_lookup", "rms_norm", "rope", "matmul_f16",
             "vecmat_f16", "vecmat_scaled",
-            "silu_gate", "add_residual", "matmul_scaled", "causal_attention",
+            "silu_gate", "add_residual", "scale_f16",
+            "matmul_scaled", "causal_attention",
             "multihead_attention",
         ];
 
@@ -286,6 +287,26 @@ impl OpsEngine {
             let tg_size = 256u64.min(size as u64);
             encoder.dispatch_thread_groups(
                 MTLSize::new((size as u64 + tg_size - 1) / tg_size, 1, 1),
+                MTLSize::new(tg_size, 1, 1),
+            );
+        });
+    }
+
+    /// Scale f16 buffer in-place: x[i] *= scale
+    ///
+    /// Eliminates CPU↔GPU round-trips for scalar multiplication.
+    /// Granite uses 3 scaling ops per layer (embedding, attention, residual)
+    /// which previously required ~121 GPU syncs per token. With this kernel,
+    /// all scaling stays within a single GPU command buffer batch.
+    pub fn scale_f16(&self, x: &Buffer, count: u32, scale: f32) {
+        self.encode_compute(|encoder| {
+            encoder.set_compute_pipeline_state(&self.kernels["scale_f16"]);
+            encoder.set_buffer(0, Some(x), 0);
+            encoder.set_bytes(1, 4, &count as *const u32 as *const c_void);
+            encoder.set_bytes(2, 4, &scale as *const f32 as *const c_void);
+            let tg_size = 256u64.min(count as u64);
+            encoder.dispatch_thread_groups(
+                MTLSize::new((count as u64 + tg_size - 1) / tg_size, 1, 1),
                 MTLSize::new(tg_size, 1, 1),
             );
         });

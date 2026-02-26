@@ -304,6 +304,166 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Fabric ↔ Weight Serialization
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Serialize all model weights into a contiguous byte buffer (f16, little-endian).
+///
+/// Tensor order (canonical):
+///   embed_tokens | layer[0..N] | final_norm | lm_head
+///
+/// Each layer writes in order:
+///   q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj,
+///   input_layernorm, post_attention_layernorm, [q_bias, k_bias, v_bias]
+pub fn serialize_weights(weights: &ModelWeights) -> (Vec<u8>, bool) {
+    let mut buf = Vec::new();
+    let has_biases = weights.layers.first().map_or(false, |l| l.q_bias.is_some());
+
+    // Helper: write a Vec<F16> as raw bytes
+    fn write_f16(buf: &mut Vec<u8>, data: &[F16]) {
+        for v in data {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+
+    // embed_tokens
+    write_f16(&mut buf, &weights.embed_tokens);
+
+    // Per-layer tensors
+    for layer in &weights.layers {
+        write_f16(&mut buf, &layer.q_proj);
+        write_f16(&mut buf, &layer.k_proj);
+        write_f16(&mut buf, &layer.v_proj);
+        write_f16(&mut buf, &layer.o_proj);
+        write_f16(&mut buf, &layer.gate_proj);
+        write_f16(&mut buf, &layer.up_proj);
+        write_f16(&mut buf, &layer.down_proj);
+        write_f16(&mut buf, &layer.input_layernorm);
+        write_f16(&mut buf, &layer.post_attention_layernorm);
+        if has_biases {
+            if let Some(ref b) = layer.q_bias { write_f16(&mut buf, b); }
+            if let Some(ref b) = layer.k_bias { write_f16(&mut buf, b); }
+            if let Some(ref b) = layer.v_bias { write_f16(&mut buf, b); }
+        }
+    }
+
+    // final_norm
+    write_f16(&mut buf, &weights.final_norm);
+
+    // lm_head
+    write_f16(&mut buf, &weights.lm_head);
+
+    println!("[WEIGHTS] Serialized {} bytes ({:.1} MB)",
+        buf.len(), buf.len() as f64 / (1024.0 * 1024.0));
+
+    (buf, has_biases)
+}
+
+/// Load model weights from a Fabric's embedded weights region (zero-copy read).
+///
+/// This is the runtime path: instead of reading safetensors files from disk,
+/// we read directly from the mmap'd `.aether` file. The Fabric must have
+/// had weights embedded via `Fabric::embed_weights()` during bundling.
+///
+/// # Arguments
+/// - `weight_data`: The raw weight data bytes (from `Fabric::weight_data()`)
+/// - `num_layers`: Number of transformer layers (from `Fabric::weight_manifest()`)
+/// - `has_biases`: Whether QKV biases are present (from manifest flags)
+/// - `config`: The inference config providing tensor dimensions
+pub fn load_weights_from_fabric(
+    weight_data: &[u8],
+    num_layers: usize,
+    has_biases: bool,
+    hidden_size: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate_size: usize,
+    vocab_size: usize,
+) -> Result<ModelWeights, String> {
+    println!("[WEIGHTS] Loading from Fabric ({} bytes, {} layers, biases={})",
+        weight_data.len(), num_layers, has_biases);
+
+    let mut cursor: usize = 0;
+
+    // Helper: read N f16 values from the data slice
+    let read_f16 = |cursor: &mut usize, count: usize| -> Result<Vec<F16>, String> {
+        let byte_count = count * 2;
+        if *cursor + byte_count > weight_data.len() {
+            return Err(format!(
+                "Weight data underflow: need {} bytes at offset {}, have {}",
+                byte_count, *cursor, weight_data.len()
+            ));
+        }
+        let mut vals = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = *cursor + i * 2;
+            vals.push(F16::from_le_bytes([weight_data[off], weight_data[off + 1]]));
+        }
+        *cursor += byte_count;
+        Ok(vals)
+    };
+
+    let q_dim = q_heads * head_dim;
+    let kv_dim = kv_heads * head_dim;
+
+    // embed_tokens [vocab_size * hidden_size]
+    let embed_tokens = read_f16(&mut cursor, vocab_size * hidden_size)?;
+    println!("[WEIGHTS]   embed_tokens: {} values", embed_tokens.len());
+
+    // Per-layer weights
+    let mut layers = Vec::with_capacity(num_layers);
+    for i in 0..num_layers {
+        if i % 10 == 0 {
+            println!("[WEIGHTS]   Loading layer {}/{}...", i, num_layers);
+        }
+        let q_proj = read_f16(&mut cursor, hidden_size * q_dim)?;
+        let k_proj = read_f16(&mut cursor, hidden_size * kv_dim)?;
+        let v_proj = read_f16(&mut cursor, hidden_size * kv_dim)?;
+        let o_proj = read_f16(&mut cursor, q_dim * hidden_size)?;
+        let gate_proj = read_f16(&mut cursor, hidden_size * intermediate_size)?;
+        let up_proj = read_f16(&mut cursor, hidden_size * intermediate_size)?;
+        let down_proj = read_f16(&mut cursor, intermediate_size * hidden_size)?;
+        let input_layernorm = read_f16(&mut cursor, hidden_size)?;
+        let post_attention_layernorm = read_f16(&mut cursor, hidden_size)?;
+
+        let (q_bias, k_bias, v_bias) = if has_biases {
+            (
+                Some(read_f16(&mut cursor, q_dim)?),
+                Some(read_f16(&mut cursor, kv_dim)?),
+                Some(read_f16(&mut cursor, kv_dim)?),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        layers.push(LayerWeights {
+            q_proj, k_proj, v_proj, o_proj,
+            gate_proj, up_proj, down_proj,
+            input_layernorm, post_attention_layernorm,
+            q_bias, k_bias, v_bias,
+        });
+    }
+    println!("[WEIGHTS]   All {} layers loaded from Fabric", num_layers);
+
+    // final_norm
+    let final_norm = read_f16(&mut cursor, hidden_size)?;
+
+    // lm_head
+    let lm_head = read_f16(&mut cursor, vocab_size * hidden_size)?;
+
+    println!("[WEIGHTS] Loaded {} bytes from Fabric ({:.1} MB used)",
+        cursor, cursor as f64 / (1024.0 * 1024.0));
+
+    Ok(ModelWeights {
+        embed_tokens,
+        layers,
+        final_norm,
+        lm_head,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 

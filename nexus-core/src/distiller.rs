@@ -83,8 +83,8 @@ impl<D: ModelDims> Distiller<D> {
             }
 
             // 3. Persist
-            if let Err(e) = fab.persist() {
-                eprintln!("Distiller: persist failed: {}", e);
+            if let Err(e) = fab.checkpoint() {
+                eprintln!("Distiller: checkpoint failed: {}", e);
             }
         }
     }
@@ -293,7 +293,9 @@ mod tests {
         // Verify cold pool has SparseCode written
         let codes = fabric.cold_pool_codes();
         let first = codes[0].indices;
-        assert_eq!(first, [0u16; 4], "distilled code should have zero indices (placeholder)");
+        // With a zeroed dictionary (genesis), the first 4 indices (0,1,2,3) 
+        // will have equal 0.0 scores and be selected as top-K.
+        assert_eq!(first, [0, 1, 2, 3], "distilled code should have top-4 indices");
 
         let _ = std::fs::remove_file(&tmp);
     }

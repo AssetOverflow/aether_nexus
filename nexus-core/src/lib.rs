@@ -54,6 +54,7 @@ pub mod tokenizer;
 pub mod ops;
 pub mod inference;
 pub mod agent;
+pub mod sandbox;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public re-exports
@@ -64,6 +65,8 @@ pub use types::{
     ModelDims,
     Llama8B,
     Granite2B,
+    Qwen05B,
+    DeepSeekR1_1_5B,
     // Memory types
     SparseCode,
     LoomDescriptor,
@@ -71,6 +74,8 @@ pub use types::{
     // Capability system
     CapabilityId,
     CortexError,
+    // Configuration
+    SecurityConfig,
     // Fabric
     FabricError,
     FabricLayout,
@@ -80,7 +85,7 @@ pub use types::{
     FORMAT_VERSION,
     SIGNATURE_LEN,
     MAX_RESULT_SIZE,
-    WAL_INTERVAL_MS,
+    CHECKPOINT_INTERVAL_MS,
     REM_INTERVAL_SECS,
     DISTILL_ENTROPY_THRESHOLD,
 };

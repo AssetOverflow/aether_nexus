@@ -565,3 +565,22 @@ kernel void multihead_attention(
         out_head[d] = half(acc);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Scale f16 (in-place)
+//     x[i] *= scale  (for embedding/residual/attention multipliers)
+//
+//     Eliminates CPU←GPU round-trips for scalar multiplication.
+//     Granite uses ~3 scaling steps per layer; this kernel lets all
+//     of them stay within a single GPU command buffer batch.
+// ─────────────────────────────────────────────────────────────────────────────
+
+kernel void scale_f16(
+    device half*        x            [[buffer(0)]],
+    constant uint&      count        [[buffer(1)]],
+    constant float&     scale        [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    x[gid] = half(float(x[gid]) * scale);
+}

@@ -21,7 +21,7 @@ use nexus_core::ops::OpsEngine;
 use nexus_core::tokenizer::Tokenizer;
 use nexus_core::types::{FabricLayout, Granite2B, Llama8B, NexusConfig};
 use nexus_core::weaver::WeaverEngine;
-use nexus_core::weight_loader::load_weights;
+use nexus_core::weight_loader::{load_weights, load_weights_from_fabric, serialize_weights};
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Boot the Fabric – claim Unified Memory
     println!("[BOOT] Claiming Unified Memory from '{}'...", aether_path);
-    let fabric = Fabric::<Llama8B>::boot(&aether_path)?;
+    let mut fabric = Fabric::<Llama8B>::boot(&aether_path)?;
 
     let total_mb = fabric.total_size() / (1024 * 1024);
     println!("[BOOT] Fabric mapped: {} MB", total_mb);
@@ -127,16 +127,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[BOOT] Holographic trace: {} MB", fabric.regions.trace_size / (1024 * 1024));
     println!();
 
-    // 3. Boot the Cortex
+    // 3. Boot the Cortex with sandbox policy
     println!("[CORTEX] Initializing Unified Capability Cortex...");
-    let mut cortex = nexus_core::cortex::Cortex::boot();
+    let sandbox_policy = nexus_core::sandbox::SandboxPolicy::from_config(&nexus_config.security);
+    println!("[CORTEX] Sandbox policy: {:?}", sandbox_policy);
+    let mut cortex = nexus_core::cortex::Cortex::boot(sandbox_policy);
     println!("[CORTEX] {} capabilities registered", cortex.capability_count());
     println!("[CORTEX] {:?}", cortex);
     println!();
 
     // 4. Boot the Weaver Engine (GPU pipeline)
     let metallib_path = option_env!("WEAVER_METALLIB");
-    let weaver = if let Some(path) = metallib_path {
+    let mut weaver = if let Some(path) = metallib_path {
         println!("[WEAVER] Loading Metal kernel from '{}'...", path);
         match WeaverEngine::new(path) {
             Ok(engine) => {
@@ -170,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Run benchmark if requested
     if run_bench {
-        if let Some(ref engine) = weaver {
+        if let Some(ref mut engine) = weaver {
             println!("╔══════════════════════════════════════════════════╗");
             println!("║           GPU Benchmark Mode                     ║");
             println!("╚══════════════════════════════════════════════════╝");
@@ -213,8 +215,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("[MODEL] Architecture: {}h x {}L, {} heads, vocab {}, EOS={}",
                 config.hidden_size, config.num_layers, config.q_heads, config.vocab_size, config.eos_token_id);
             
-            let weights = load_weights(&model_dir, config.num_layers)
-                .map_err(|e| format!("Weight loading failed: {}", e))?;
+            // ─── Unified Weight Loading ─────────────────────────────────────
+            // Priority: Fabric (brain.aether) → safetensors (models/**) → error
+            // If loading from safetensors, auto-embed into Fabric for next boot.
+            let weights = if fabric.weights_embedded() {
+                println!("[WEIGHTS] Loading from brain.aether (Fabric-embedded)");
+                let (num_layers, has_biases) = fabric.weight_manifest()
+                    .ok_or("Fabric has WGHT magic but corrupt manifest")?;
+                load_weights_from_fabric(
+                    fabric.weight_data(),
+                    num_layers,
+                    has_biases,
+                    config.hidden_size,
+                    config.q_heads,
+                    config.kv_heads,
+                    config.head_dim,
+                    config.intermediate_size,
+                    config.vocab_size,
+                ).map_err(|e| format!("Fabric weight load failed: {}", e))?
+            } else {
+                println!("[WEIGHTS] No embedded weights in Fabric — loading from safetensors");
+                let w = load_weights(&model_dir, config.num_layers)
+                    .map_err(|e| format!("Weight loading failed: {}", e))?;
+
+                // Auto-embed into Fabric for next boot
+                println!("[WEIGHTS] Auto-embedding weights into brain.aether...");
+                let (serialized, has_biases) = serialize_weights(&w);
+                if let Err(e) = fabric.embed_weights(&serialized, config.num_layers, has_biases) {
+                    eprintln!("[WARN] Failed to embed weights into Fabric: {}", e);
+                    eprintln!("[WARN] Weights will be loaded from safetensors on next boot");
+                } else {
+                    fabric.force_checkpoint()
+                        .unwrap_or_else(|e| eprintln!("[WARN] Checkpoint after embed failed: {}", e));
+                    println!("[WEIGHTS] Weights embedded — models/** no longer needed at runtime");
+                }
+
+                w
+            };
 
             println!("[INFERENCE] Initializing engine...");
             let mut engine = InferenceEngine::new(ops, &weights, config);
@@ -259,7 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("[TRACE] Archiving successful trajectory into Holographic Trace...");
             if let Ok(mut fab) = fabric_arc.lock() {
                 fab.append_trace(&output);
-                fab.persist().map_err(|e| format!("WAL flush failed: {:?}", e))?;
+                fab.checkpoint().map_err(|e| format!("Checkpoint flush failed: {:?}", e))?;
             } else {
                 eprintln!("Failed to acquire fabric lock to append trace.");
             }
@@ -278,7 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("The cognitive loop would now enter the eternal cycle:");
     println!("  1. Weaver decode (GPU) → action tensor");
     println!("  2. Cortex dispatch → zero-copy mutation");
-    println!("  3. WAL persistence → holographic trace");
+    println!("  3. Checkpoint persistence → holographic trace");
     println!("  4. Next persona Loom activates");
     println!("  5. Background ANE distillation");
     println!();

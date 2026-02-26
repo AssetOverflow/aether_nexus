@@ -82,7 +82,7 @@ impl std::fmt::Display for BenchResults {
 /// This generates synthetic data of the correct shape and measures
 /// GPU decode throughput.
 pub fn run_benchmark(
-    engine: &WeaverEngine,
+    engine: &mut WeaverEngine,
     config: &BenchConfig,
 ) -> Result<BenchResults, String> {
     let q_heads: u32 = 32;
