@@ -24,7 +24,8 @@ use crate::types::{
 };
 
 use half::f16;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,26 +65,14 @@ impl<D: ModelDims> Distiller<D> {
 
             // 1. Evaluate entropy of hot blocks
             let candidates = {
-                let fab = match fabric.lock() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("Distiller: Fabric lock poisoned: {}", e);
-                        continue;
-                    }
-                };
+                let fab = fabric.lock().await;
                 self.evaluate_entropy(&fab)
             };
             
             if !candidates.is_empty() {
                 // 2. Distill candidates (locking individually to allow inference to interleave)
                 for block_idx in candidates {
-                    let mut fab = match fabric.lock() {
-                        Ok(f) => f,
-                        Err(e) => {
-                            eprintln!("Distiller: Fabric lock poisoned: {}", e);
-                            break;
-                        }
-                    };
+                    let mut fab = fabric.lock().await;
                     if let Err(e) = Self::distill_block(&mut fab, block_idx) {
                         eprintln!("Distiller: block {} failed: {}", block_idx, e);
                     }
@@ -91,7 +80,8 @@ impl<D: ModelDims> Distiller<D> {
             }
 
             // 3. Persist
-            if let Ok(mut fab) = fabric.lock() {
+            {
+                let mut fab: tokio::sync::MutexGuard<'_, Fabric<D>> = fabric.lock().await;
                 if let Err(e) = fab.checkpoint() {
                     eprintln!("Distiller: checkpoint failed: {}", e);
                 }

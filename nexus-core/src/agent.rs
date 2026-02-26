@@ -30,7 +30,7 @@ impl<'a> AgentLoop<'a> {
     }
 
     /// Execute a text-based tool call and return the observation string.
-    fn execute_tool(&self, tool_call: &str) -> String {
+    pub(crate) fn execute_tool(&self, tool_call: &str) -> String {
         // Parse "ToolName|arg" format
         let parts: Vec<&str> = tool_call.splitn(2, '|').collect();
         let tool_name = parts[0].trim();
@@ -56,9 +56,10 @@ impl<'a> AgentLoop<'a> {
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
                         let result = if !stdout.is_empty() { stdout.to_string() } else { stderr.to_string() };
-                        // Truncate to avoid overwhelming the context
-                        if result.len() > 500 {
-                            format!("{}...[truncated]", &result[..500])
+                        // Truncate to avoid overwhelming the context (approx 500 chars)
+                        let result_len = result.chars().count();
+                        if result_len > 500 {
+                            format!("{}...[truncated]", result.chars().take(500).collect::<String>())
                         } else if result.is_empty() {
                             "(no output)".to_string()
                         } else {
@@ -76,8 +77,8 @@ impl<'a> AgentLoop<'a> {
                 };
                 match std::fs::read_to_string(&validated_path) {
                     Ok(content) => {
-                        if content.len() > 500 {
-                            format!("{}...[truncated]", &content[..500])
+                        if content.chars().count() > 500 {
+                            format!("{}...[truncated]", content.chars().take(500).collect::<String>())
                         } else {
                             content
                         }
@@ -137,11 +138,11 @@ impl<'a> AgentLoop<'a> {
                     .output();
                 match output {
                     Ok(out) => {
-                        let result = String::from_utf8_lossy(&out.stderr).to_string();
-                        if result.len() > 500 {
-                            format!("{}...[truncated]", &result[..500])
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        if stderr.chars().count() > 500 {
+                            format!("{}...[truncated]", stderr.chars().take(500).collect::<String>())
                         } else {
-                            result
+                            stderr
                         }
                     }
                     Err(e) => format!("Error: {}", e),
@@ -326,8 +327,8 @@ impl<'a> AgentLoop<'a> {
                     // Actually execute the tool!
                     let observation = self.execute_tool(&call_content);
                     
-                    println!("[CORTEX] Result: {}", if observation.len() > 100 { 
-                        format!("{}...", &observation[..100]) 
+                    println!("[CORTEX] Result: {}", if observation.chars().count() > 100 { 
+                        format!("{}...", observation.chars().take(100).collect::<String>()) 
                     } else { 
                         observation.clone() 
                     });

@@ -264,7 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Spawn HITL interrupt thread
             let (tx, rx) = std::sync::mpsc::channel::<String>();
-            let fabric_arc = Arc::new(std::sync::Mutex::new(fabric));
+            let fabric_arc = Arc::new(tokio::sync::Mutex::new(fabric));
             let distill_memory_config = nexus_config.memory.clone();
             
             let mut distiller = Distiller::<Llama8B>::new(distill_memory_config);
@@ -294,11 +294,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
             
             println!("[TRACE] Archiving successful trajectory into Holographic Trace...");
-            if let Ok(mut fab) = fabric_arc.lock() {
+            {
+                let mut fab = fabric_arc.lock().await;
                 fab.append_trace(&output);
                 fab.checkpoint().map_err(|e| format!("Checkpoint flush failed: {:?}", e))?;
-            } else {
-                eprintln!("Failed to acquire fabric lock to append trace.");
             }
         } else {
             println!("⚠️  OPS_METALLIB not set. Cannot run inference.");

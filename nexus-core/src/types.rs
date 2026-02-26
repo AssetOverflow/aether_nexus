@@ -191,19 +191,19 @@ impl ModelDims for DeepSeekR1_1_5B {
 /// 4 dictionary indices (0..511) + 4 learned coefficients.
 ///
 /// # Invariants
-/// - `#[repr(C)]` ensures no padding → exactly `4*2 + 4*2 = 16` bytes
+/// - `#[repr(C, align(16))]` ensures no padding → exactly `4*2 + 4*2 = 16` bytes
 /// - `Pod + Zeroable` enables zero-copy reinterpretation from mmap'd memory
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SparseCode {
-    /// Dictionary indices (each in range 0..DICT_SIZE)
+    /// Indices of the 4 dictionary vectors (u16 for 64k vocab)
     pub indices: [u16; 4],
-    /// Sparse coefficients (learned via dictionary projection)
+    /// Coefficients for each vector (f16)
     pub coeffs: [f16; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<SparseCode>() == 16);
-const _: () = assert!(std::mem::align_of::<SparseCode>() == 2);
+const _: () = assert!(std::mem::align_of::<SparseCode>() == 16);
 
 
 
@@ -509,10 +509,10 @@ mod tests {
         );
     }
 
-    /// Verify SparseCode alignment (repr(C) → align 2)
+    /// Verify SparseCode alignment (repr(C, align(16)) → align 16)
     #[test]
     fn sparse_code_alignment() {
-        assert_eq!(std::mem::align_of::<SparseCode>(), 2);
+        assert_eq!(std::mem::align_of::<SparseCode>(), 16);
     }
 
     /// Verify default SparseCode is all zeroes

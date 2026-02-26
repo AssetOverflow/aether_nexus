@@ -10,14 +10,13 @@ authors = ["AetherNexus Forge"]
 rust-version = "1.85"
 
 [workspace.dependencies]
-mlx-rs = { version = "0.21", features = ["metal"] }
 metal = "0.30"
 bytemuck = { version = "1.19", features = ["derive"] }
 half = { version = "2.4", features = ["bytemuck"] }
 thiserror = "2"
 memmap2 = "0.9"
 ring = "0.17"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 grep-searcher = "0.1"
 grep-regex = "0.1"
 grep-matcher = "0.1"

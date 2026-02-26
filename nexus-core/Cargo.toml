@@ -8,7 +8,6 @@ rust-version.workspace = true
 description = "AetherNexus – A Sovereign Tensor Organism for Apple Silicon"
 
 [dependencies]
-mlx-rs.workspace = true
 metal.workspace = true
 bytemuck.workspace = true
 half.workspace = true
