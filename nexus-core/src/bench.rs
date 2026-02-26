@@ -70,7 +70,10 @@ impl std::fmt::Display for BenchResults {
         if self.tokens_per_sec >= 92.0 {
             writeln!(f, "  ✅ Meets Yellowpaper target (≥92 tok/s)")?;
         } else {
-            writeln!(f, "  ⚠️  Below Yellowpaper target (92 tok/s). This is expected")?;
+            writeln!(
+                f,
+                "  ⚠️  Below Yellowpaper target (92 tok/s). This is expected"
+            )?;
             writeln!(f, "      with synthetic data and unoptimized debug builds.")?;
         }
         Ok(())
@@ -97,8 +100,14 @@ pub fn run_benchmark(
     let kv_tokens = ((hot_count + cold_count) * block_size) as usize;
 
     println!("[BENCH] Generating synthetic data...");
-    println!("[BENCH]   q_heads={}, kv_heads={}, head_dim={}", q_heads, kv_heads, head_dim);
-    println!("[BENCH]   hot_blocks={}, cold_blocks={}, block_size={}", hot_count, cold_count, block_size);
+    println!(
+        "[BENCH]   q_heads={}, kv_heads={}, head_dim={}",
+        q_heads, kv_heads, head_dim
+    );
+    println!(
+        "[BENCH]   hot_blocks={}, cold_blocks={}, block_size={}",
+        hot_count, cold_count, block_size
+    );
     println!("[BENCH]   KV tokens/step: {}", kv_tokens);
 
     // Generate synthetic data with small random-ish values
@@ -127,8 +136,13 @@ pub fn run_benchmark(
     println!("[BENCH] Warmup ({} iterations)...", config.warmup);
     for _ in 0..config.warmup {
         engine.decode(
-            &q_exact, &q_latent, &hot_pool, &cold_pool,
-            &loom_refs, &dictionary, &params,
+            &q_exact,
+            &q_latent,
+            &hot_pool,
+            &cold_pool,
+            &loom_refs,
+            &dictionary,
+            &params,
         )?;
     }
 
@@ -138,8 +152,13 @@ pub fn run_benchmark(
 
     for _ in 0..config.iterations {
         engine.decode(
-            &q_exact, &q_latent, &hot_pool, &cold_pool,
-            &loom_refs, &dictionary, &params,
+            &q_exact,
+            &q_latent,
+            &hot_pool,
+            &cold_pool,
+            &loom_refs,
+            &dictionary,
+            &params,
         )?;
     }
 

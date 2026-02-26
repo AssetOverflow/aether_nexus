@@ -25,7 +25,7 @@ struct SafetensorsIndex {
 
 /// All weight tensors for a single transformer layer (converted to f16).
 pub struct LayerWeights {
-    /// Query projection [hidden_size, hidden_size] 
+    /// Query projection [hidden_size, hidden_size]
     pub q_proj: Vec<F16>,
     /// Key projection [hidden_size, kv_dim]
     pub k_proj: Vec<F16>,
@@ -104,12 +104,20 @@ fn f16_direct(data: &[u8]) -> Vec<F16> {
 
 /// Convert raw bytes (f32 format) to a Vec of f16 values.
 fn f32_to_f16(data: &[u8]) -> Vec<F16> {
-    assert!(data.len() % 4 == 0, "f32 data must have byte count divisible by 4");
+    assert!(
+        data.len() % 4 == 0,
+        "f32 data must have byte count divisible by 4"
+    );
     let count = data.len() / 4;
     let mut result = Vec::with_capacity(count);
 
     for i in 0..count {
-        let bytes = [data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]];
+        let bytes = [
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ];
         let f = f32::from_le_bytes(bytes);
         result.push(F16::from_f32(f));
     }
@@ -148,9 +156,12 @@ fn load_tensor(
     let tensors = SafeTensors::deserialize(file_data)
         .map_err(|e| format!("Failed to deserialize '{}': {}", file_name, e))?;
 
-    let tensor = tensors
-        .tensor(tensor_name)
-        .map_err(|e| format!("Tensor '{}' not found in '{}': {}", tensor_name, file_name, e))?;
+    let tensor = tensors.tensor(tensor_name).map_err(|e| {
+        format!(
+            "Tensor '{}' not found in '{}': {}",
+            tensor_name, file_name, e
+        )
+    })?;
 
     tensor_to_f16(tensor.data(), tensor.dtype())
 }
@@ -177,12 +188,15 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
 
     let (weight_map, file_cache) = if index_path.exists() {
         // Multi-shard: read index and load each referenced file
-        let index_data = fs::read_to_string(&index_path)
-            .map_err(|e| format!("Failed to read index: {}", e))?;
+        let index_data =
+            fs::read_to_string(&index_path).map_err(|e| format!("Failed to read index: {}", e))?;
         let index: SafetensorsIndex = serde_json::from_str(&index_data)
             .map_err(|e| format!("Failed to parse index: {}", e))?;
 
-        println!("[WEIGHTS] Index loaded: {} tensors across multiple shards", index.weight_map.len());
+        println!(
+            "[WEIGHTS] Index loaded: {} tensors across multiple shards",
+            index.weight_map.len()
+        );
 
         let unique_files: Vec<String> = {
             let mut files: Vec<String> = index.weight_map.values().cloned().collect();
@@ -256,28 +270,70 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
 
         let q_bias = if weight_map.contains_key(&q_bias_key) {
             Some(load_tensor(&q_bias_key, &weight_map, &file_cache)?)
-        } else { None };
+        } else {
+            None
+        };
         let k_bias = if weight_map.contains_key(&k_bias_key) {
             Some(load_tensor(&k_bias_key, &weight_map, &file_cache)?)
-        } else { None };
+        } else {
+            None
+        };
         let v_bias = if weight_map.contains_key(&v_bias_key) {
             Some(load_tensor(&v_bias_key, &weight_map, &file_cache)?)
-        } else { None };
+        } else {
+            None
+        };
 
         if i == 0 && q_bias.is_some() {
             println!("[WEIGHTS] QKV biases detected (Qwen-style)");
         }
 
         let layer = LayerWeights {
-            q_proj: load_tensor(&format!("{}.self_attn.q_proj.weight", prefix), &weight_map, &file_cache)?,
-            k_proj: load_tensor(&format!("{}.self_attn.k_proj.weight", prefix), &weight_map, &file_cache)?,
-            v_proj: load_tensor(&format!("{}.self_attn.v_proj.weight", prefix), &weight_map, &file_cache)?,
-            o_proj: load_tensor(&format!("{}.self_attn.o_proj.weight", prefix), &weight_map, &file_cache)?,
-            gate_proj: load_tensor(&format!("{}.mlp.gate_proj.weight", prefix), &weight_map, &file_cache)?,
-            up_proj: load_tensor(&format!("{}.mlp.up_proj.weight", prefix), &weight_map, &file_cache)?,
-            down_proj: load_tensor(&format!("{}.mlp.down_proj.weight", prefix), &weight_map, &file_cache)?,
-            input_layernorm: load_tensor(&format!("{}.input_layernorm.weight", prefix), &weight_map, &file_cache)?,
-            post_attention_layernorm: load_tensor(&format!("{}.post_attention_layernorm.weight", prefix), &weight_map, &file_cache)?,
+            q_proj: load_tensor(
+                &format!("{}.self_attn.q_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            k_proj: load_tensor(
+                &format!("{}.self_attn.k_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            v_proj: load_tensor(
+                &format!("{}.self_attn.v_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            o_proj: load_tensor(
+                &format!("{}.self_attn.o_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            gate_proj: load_tensor(
+                &format!("{}.mlp.gate_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            up_proj: load_tensor(
+                &format!("{}.mlp.up_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            down_proj: load_tensor(
+                &format!("{}.mlp.down_proj.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            input_layernorm: load_tensor(
+                &format!("{}.input_layernorm.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
+            post_attention_layernorm: load_tensor(
+                &format!("{}.post_attention_layernorm.weight", prefix),
+                &weight_map,
+                &file_cache,
+            )?,
             q_bias,
             k_bias,
             v_bias,
@@ -345,9 +401,15 @@ pub fn serialize_weights(weights: &ModelWeights) -> (Vec<u8>, bool) {
         write_f16(&mut buf, &layer.input_layernorm);
         write_f16(&mut buf, &layer.post_attention_layernorm);
         if has_biases {
-            if let Some(ref b) = layer.q_bias { write_f16(&mut buf, b); }
-            if let Some(ref b) = layer.k_bias { write_f16(&mut buf, b); }
-            if let Some(ref b) = layer.v_bias { write_f16(&mut buf, b); }
+            if let Some(ref b) = layer.q_bias {
+                write_f16(&mut buf, b);
+            }
+            if let Some(ref b) = layer.k_bias {
+                write_f16(&mut buf, b);
+            }
+            if let Some(ref b) = layer.v_bias {
+                write_f16(&mut buf, b);
+            }
         }
     }
 
@@ -357,8 +419,11 @@ pub fn serialize_weights(weights: &ModelWeights) -> (Vec<u8>, bool) {
     // lm_head
     write_f16(&mut buf, &weights.lm_head);
 
-    println!("[WEIGHTS] Serialized {} bytes ({:.1} MB)",
-        buf.len(), buf.len() as f64 / (1024.0 * 1024.0));
+    println!(
+        "[WEIGHTS] Serialized {} bytes ({:.1} MB)",
+        buf.len(),
+        buf.len() as f64 / (1024.0 * 1024.0)
+    );
 
     (buf, has_biases)
 }
@@ -385,8 +450,12 @@ pub fn load_weights_from_fabric(
     intermediate_size: usize,
     vocab_size: usize,
 ) -> Result<ModelWeights, String> {
-    println!("[WEIGHTS] Loading from Fabric ({} bytes, {} layers, biases={})",
-        weight_data.len(), num_layers, has_biases);
+    println!(
+        "[WEIGHTS] Loading from Fabric ({} bytes, {} layers, biases={})",
+        weight_data.len(),
+        num_layers,
+        has_biases
+    );
 
     let mut cursor: usize = 0;
 
@@ -396,7 +465,9 @@ pub fn load_weights_from_fabric(
         if *cursor + byte_count > weight_data.len() {
             return Err(format!(
                 "Weight data underflow: need {} bytes at offset {}, have {}",
-                byte_count, *cursor, weight_data.len()
+                byte_count,
+                *cursor,
+                weight_data.len()
             ));
         }
         let mut vals = Vec::with_capacity(count);
@@ -442,10 +513,18 @@ pub fn load_weights_from_fabric(
         };
 
         layers.push(LayerWeights {
-            q_proj, k_proj, v_proj, o_proj,
-            gate_proj, up_proj, down_proj,
-            input_layernorm, post_attention_layernorm,
-            q_bias, k_bias, v_bias,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            gate_proj,
+            up_proj,
+            down_proj,
+            input_layernorm,
+            post_attention_layernorm,
+            q_bias,
+            k_bias,
+            v_bias,
         });
     }
     println!("[WEIGHTS]   All {} layers loaded from Fabric", num_layers);
@@ -456,8 +535,11 @@ pub fn load_weights_from_fabric(
     // lm_head
     let lm_head = read_f16(&mut cursor, vocab_size * hidden_size)?;
 
-    println!("[WEIGHTS] Loaded {} bytes from Fabric ({:.1} MB used)",
-        cursor, cursor as f64 / (1024.0 * 1024.0));
+    println!(
+        "[WEIGHTS] Loaded {} bytes from Fabric ({:.1} MB used)",
+        cursor,
+        cursor as f64 / (1024.0 * 1024.0)
+    );
 
     Ok(ModelWeights {
         embed_tokens,
@@ -501,7 +583,10 @@ mod tests {
             let got = result[i].to_f32();
             assert!(
                 (got - expected).abs() < 0.1,
-                "Index {}: expected {}, got {}", i, expected, got
+                "Index {}: expected {}, got {}",
+                i,
+                expected,
+                got
             );
         }
     }

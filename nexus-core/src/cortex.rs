@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use crate::capability::{Capability, HandlerFn};
 use crate::fabric::Fabric;
-use crate::sandbox::SandboxPolicy;
-use crate::types::{CapabilityId, CortexError, ModelDims, MAX_RESULT_SIZE};
 use crate::register_capability;
+use crate::sandbox::SandboxPolicy;
+use crate::types::{CapabilityId, CortexError, MAX_RESULT_SIZE, ModelDims};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -222,9 +222,7 @@ impl Capability for GitStatus {
         for entry in statuses.iter() {
             let status = entry.status();
             if status.intersects(
-                git2::Status::WT_MODIFIED
-                    | git2::Status::INDEX_MODIFIED
-                    | git2::Status::WT_RENAMED,
+                git2::Status::WT_MODIFIED | git2::Status::INDEX_MODIFIED | git2::Status::WT_RENAMED,
             ) {
                 modified += 1;
             }
@@ -289,8 +287,8 @@ impl Capability for TensorRegex {
         res_buf: &mut [u8],
         _policy: &SandboxPolicy,
     ) -> Result<Self::Result, CortexError> {
-        use grep_regex::RegexMatcher;
         use grep_matcher::Matcher;
+        use grep_regex::RegexMatcher;
 
         let pattern_offset = args.pattern_offset as usize;
         let pattern_end = arg_buf[pattern_offset..]
@@ -299,8 +297,9 @@ impl Capability for TensorRegex {
             .map(|p| pattern_offset + p)
             .unwrap_or(arg_buf.len().min(pattern_offset + 256));
 
-        let pattern = std::str::from_utf8(&arg_buf[pattern_offset..pattern_end])
-            .map_err(|e| CortexError::ExecutionFailed(format!("invalid UTF-8 in pattern: {}", e)))?;
+        let pattern = std::str::from_utf8(&arg_buf[pattern_offset..pattern_end]).map_err(|e| {
+            CortexError::ExecutionFailed(format!("invalid UTF-8 in pattern: {}", e))
+        })?;
 
         let text_offset = args.text_offset as usize;
         let text_end = arg_buf[text_offset..]
@@ -343,7 +342,10 @@ impl Capability for TensorRegex {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    return Err(CortexError::ExecutionFailed(format!("regex search error: {}", e)));
+                    return Err(CortexError::ExecutionFailed(format!(
+                        "regex search error: {}",
+                        e
+                    )));
                 }
             }
         }
@@ -375,8 +377,7 @@ pub struct FileReadResult {
     pub data_offset: u32,
 }
 
-
-use wasmtime::{Engine, Module, Store, Instance};
+use wasmtime::{Engine, Instance, Module, Store};
 
 pub struct FileRead;
 
@@ -385,7 +386,12 @@ impl Capability for FileRead {
     type Result = FileReadResult;
     const ID: CapabilityId = CapabilityId::FileRead;
 
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError> {
         let path_offset = args.path_offset as usize;
         let path_end = arg_buf[path_offset..]
             .iter()
@@ -400,13 +406,15 @@ impl Capability for FileRead {
         let validated_path = policy.validate_path(path_str)?;
 
         let data = std::fs::read(&validated_path).map_err(CortexError::Io)?;
-        
+
         let result_struct_size = std::mem::size_of::<FileReadResult>();
-        let max_copy = (args.max_bytes as usize).min(res_buf.len().saturating_sub(result_struct_size));
+        let max_copy =
+            (args.max_bytes as usize).min(res_buf.len().saturating_sub(result_struct_size));
         let to_copy = data.len().min(max_copy);
 
         if to_copy > 0 {
-            res_buf[result_struct_size..result_struct_size + to_copy].copy_from_slice(&data[..to_copy]);
+            res_buf[result_struct_size..result_struct_size + to_copy]
+                .copy_from_slice(&data[..to_copy]);
         }
 
         Ok(FileReadResult {
@@ -441,7 +449,12 @@ impl Capability for FileWrite {
     type Result = FileWriteResult;
     const ID: CapabilityId = CapabilityId::FileWrite;
 
-    fn execute(args: Self::Args, arg_buf: &[u8], _res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        _res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError> {
         let path_offset = args.path_offset as usize;
         let path_end = arg_buf[path_offset..]
             .iter()
@@ -457,9 +470,12 @@ impl Capability for FileWrite {
 
         let data_offset = args.data_offset as usize;
         let data_len = args.data_len as usize;
-        
+
         if data_offset + data_len > arg_buf.len() {
-            return Err(CortexError::ArgOutOfBounds { offset: data_offset, size: arg_buf.len() });
+            return Err(CortexError::ArgOutOfBounds {
+                offset: data_offset,
+                size: arg_buf.len(),
+            });
         }
 
         let data = &arg_buf[data_offset..data_offset + data_len];
@@ -495,7 +511,12 @@ impl Capability for DirList {
     type Result = DirListResult;
     const ID: CapabilityId = CapabilityId::DirList;
 
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError> {
         let path_offset = args.path_offset as usize;
         let path_end = arg_buf[path_offset..]
             .iter()
@@ -512,7 +533,7 @@ impl Capability for DirList {
         let entries = std::fs::read_dir(&validated_path).map_err(CortexError::Io)?;
         let mut count = 0;
         let mut listing = String::new();
-        
+
         for entry in entries {
             if let Ok(entry) = entry {
                 let name = entry.file_name();
@@ -533,7 +554,8 @@ impl Capability for DirList {
         let to_copy = data_bytes.len().min(max_copy);
 
         if to_copy > 0 {
-            res_buf[result_struct_size..result_struct_size + to_copy].copy_from_slice(&data_bytes[..to_copy]);
+            res_buf[result_struct_size..result_struct_size + to_copy]
+                .copy_from_slice(&data_bytes[..to_copy]);
         }
 
         Ok(DirListResult {
@@ -574,7 +596,12 @@ impl Capability for ShellRunner {
     type Result = ShellRunnerResult;
     const ID: CapabilityId = CapabilityId::ShellRunner;
 
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError> {
         let path_offset = args.workspace_path_offset as usize;
         let path_end = arg_buf[path_offset..]
             .iter()
@@ -582,8 +609,9 @@ impl Capability for ShellRunner {
             .map(|p| path_offset + p)
             .unwrap_or(arg_buf.len().min(path_offset + 256));
 
-        let workspace_path = std::str::from_utf8(&arg_buf[path_offset..path_end])
-            .map_err(|e| CortexError::ExecutionFailed(format!("invalid UTF-8 in workspace_path: {}", e)))?;
+        let workspace_path = std::str::from_utf8(&arg_buf[path_offset..path_end]).map_err(|e| {
+            CortexError::ExecutionFailed(format!("invalid UTF-8 in workspace_path: {}", e))
+        })?;
 
         // Validate workspace path against sandbox
         let validated_workspace = policy.validate_path(workspace_path)?;
@@ -604,14 +632,22 @@ impl Capability for ShellRunner {
         // Use the configured timeout, capped by policy max
         let timeout = if args.timeout_ms > 0 {
             std::time::Duration::from_millis(
-                (args.timeout_ms as u64).min(policy.max_timeout.as_millis() as u64)
+                (args.timeout_ms as u64).min(policy.max_timeout.as_millis() as u64),
             )
         } else {
             policy.max_timeout
         };
 
         // Execute with structured command (no shell=True equivalent)
-        let child = std::process::Command::new(&binary)
+        let mut command = std::process::Command::new(&binary);
+        if policy.clear_env {
+            command.env_clear();
+            if let Ok(path) = std::env::var("PATH") {
+                command.env("PATH", path);
+            }
+        }
+
+        let child = command
             .args(&cmd_args)
             .current_dir(&validated_workspace)
             .stdout(std::process::Stdio::piped())
@@ -706,18 +742,28 @@ impl Capability for SafeEval {
     type Result = SafeEvalResult;
     const ID: CapabilityId = CapabilityId::SafeEval;
 
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError> {
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError> {
         let offset = args.wasm_offset as usize;
         let len = args.wasm_len as usize;
 
         if offset + len > arg_buf.len() {
-            return Err(CortexError::ArgOutOfBounds { offset, size: arg_buf.len() });
+            return Err(CortexError::ArgOutOfBounds {
+                offset,
+                size: arg_buf.len(),
+            });
         }
 
         let wasm_bytes = &arg_buf[offset..offset + len];
 
-        println!("[CORTEX] SafeEval: executing {} bytes of WebAssembly (fuel={}, mem_pages={})",
-            len, policy.wasm_fuel, policy.wasm_memory_pages);
+        println!(
+            "[CORTEX] SafeEval: executing {} bytes of WebAssembly (fuel={}, mem_pages={})",
+            len, policy.wasm_fuel, policy.wasm_memory_pages
+        );
 
         // Create engine with fuel metering enabled
         let mut config = wasmtime::Config::new();
@@ -729,15 +775,20 @@ impl Capability for SafeEval {
 
         let module = match Module::new(&engine, wasm_bytes) {
             Ok(m) => m,
-            Err(e) => return Err(CortexError::ExecutionFailed(format!("Invalid Wasm module: {}", e))),
+            Err(e) => {
+                return Err(CortexError::ExecutionFailed(format!(
+                    "Invalid Wasm module: {}",
+                    e
+                )));
+            }
         };
 
         let mut store = Store::new(&engine, ());
 
         // Set fuel limit from sandbox policy
-        store.set_fuel(policy.wasm_fuel).map_err(|e| {
-            CortexError::ExecutionFailed(format!("Failed to set fuel: {}", e))
-        })?;
+        store
+            .set_fuel(policy.wasm_fuel)
+            .map_err(|e| CortexError::ExecutionFailed(format!("Failed to set fuel: {}", e)))?;
 
         // Enable epoch-based interruption for timeout enforcement
         store.epoch_deadline_trap();
@@ -758,13 +809,23 @@ impl Capability for SafeEval {
 
         let instance = match Instance::new(&mut store, &module, &[]) {
             Ok(i) => i,
-            Err(e) => return Err(CortexError::ExecutionFailed(format!("Wasm instantiation failed: {}", e))),
+            Err(e) => {
+                return Err(CortexError::ExecutionFailed(format!(
+                    "Wasm instantiation failed: {}",
+                    e
+                )));
+            }
         };
 
         // Expect the module to export a `run` function returning an i32 exit code
         let typed_func = match instance.get_typed_func::<(), i32>(&mut store, "run") {
             Ok(f) => f,
-            Err(e) => return Err(CortexError::ExecutionFailed(format!("Wasm missing 'run' fn returning i32: {}", e))),
+            Err(e) => {
+                return Err(CortexError::ExecutionFailed(format!(
+                    "Wasm missing 'run' fn returning i32: {}",
+                    e
+                )));
+            }
         };
 
         let exit_code = match typed_func.call(&mut store, ()) {
@@ -772,35 +833,41 @@ impl Capability for SafeEval {
             Err(e) => {
                 // Check if this was a fuel exhaustion or epoch interruption
                 if e.to_string().contains("fuel") {
-                    return Err(CortexError::ExecutionFailed(
-                        format!("Wasm execution exceeded fuel limit ({})", policy.wasm_fuel)
-                    ));
+                    return Err(CortexError::ExecutionFailed(format!(
+                        "Wasm execution exceeded fuel limit ({})",
+                        policy.wasm_fuel
+                    )));
                 }
                 if e.to_string().contains("epoch") {
-                    return Err(CortexError::ExecutionFailed(
-                        format!("Wasm execution timed out after {} ms", timeout_ms)
-                    ));
+                    return Err(CortexError::ExecutionFailed(format!(
+                        "Wasm execution timed out after {} ms",
+                        timeout_ms
+                    )));
                 }
-                return Err(CortexError::ExecutionFailed(format!("Wasm execution trapped: {}", e)));
+                return Err(CortexError::ExecutionFailed(format!(
+                    "Wasm execution trapped: {}",
+                    e
+                )));
             }
         };
 
         // Clean up timeout thread (it'll exit on its own after the sleep)
         let _ = timeout_handle;
-        
+
         let result_struct_size = std::mem::size_of::<SafeEvalResult>();
         let remaining_fuel = store.get_fuel().unwrap_or(0);
         let stdout_msg = format!(
             "SafeEval OK, exit_code: {}, fuel_remaining: {}/{}\n",
             exit_code, remaining_fuel, policy.wasm_fuel
         );
-        
+
         // Write stdout string
         let max_copy = res_buf.len().saturating_sub(result_struct_size);
         let to_copy = stdout_msg.len().min(max_copy);
-        
+
         if to_copy > 0 {
-            res_buf[result_struct_size..result_struct_size + to_copy].copy_from_slice(&stdout_msg.as_bytes()[..to_copy]);
+            res_buf[result_struct_size..result_struct_size + to_copy]
+                .copy_from_slice(&stdout_msg.as_bytes()[..to_copy]);
         }
 
         Ok(SafeEvalResult {
@@ -894,8 +961,7 @@ impl Cortex {
         let arg_off = action_data[1] as usize;
         let res_off = action_data[2] as usize;
 
-        let id = CapabilityId::from_raw(raw_id)
-            .ok_or(CortexError::InvalidId(raw_id))?;
+        let id = CapabilityId::from_raw(raw_id).ok_or(CortexError::InvalidId(raw_id))?;
 
         let handler = self
             .handlers
@@ -967,8 +1033,8 @@ impl std::fmt::Debug for Cortex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Llama8B;
     use crate::fabric::create_genesis;
+    use crate::types::Llama8B;
     use ring::rand::SystemRandom;
     use ring::signature::Ed25519KeyPair;
 

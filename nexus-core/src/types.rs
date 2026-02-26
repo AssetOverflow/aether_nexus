@@ -34,8 +34,8 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_reflection_steps: 10,
-            max_tokens: 128,
+            max_reflection_steps: 15,
+            max_tokens: 512,
         }
     }
 }
@@ -83,19 +83,40 @@ pub struct SecurityConfig {
     /// Wasmtime memory page limit (64 KB per page).
     #[serde(default = "SecurityConfig::default_memory_pages")]
     pub wasm_memory_pages: u32,
+    /// Clear parent environment variables for subprocesses.
+    #[serde(default = "SecurityConfig::default_clear_env")]
+    pub clear_env: bool,
 }
 
 impl SecurityConfig {
     fn default_commands() -> Vec<String> {
         vec![
-            "cargo".into(), "git".into(), "ls".into(), "cat".into(),
-            "head".into(), "tail".into(), "find".into(), "grep".into(),
-            "wc".into(), "echo".into(), "mkdir".into(), "rustfmt".into(),
+            "cargo".into(),
+            "git".into(),
+            "ls".into(),
+            "cat".into(),
+            "head".into(),
+            "tail".into(),
+            "find".into(),
+            "grep".into(),
+            "wc".into(),
+            "echo".into(),
+            "mkdir".into(),
+            "rustfmt".into(),
         ]
     }
-    fn default_timeout() -> u64 { 30_000 }
-    fn default_fuel() -> u64 { 1_000_000 }
-    fn default_memory_pages() -> u32 { 256 }
+    fn default_timeout() -> u64 {
+        30_000
+    }
+    fn default_fuel() -> u64 {
+        1_000_000
+    }
+    fn default_memory_pages() -> u32 {
+        256
+    }
+    fn default_clear_env() -> bool {
+        true
+    }
 }
 
 impl Default for SecurityConfig {
@@ -106,6 +127,7 @@ impl Default for SecurityConfig {
             max_subprocess_timeout_ms: Self::default_timeout(),
             wasm_fuel: Self::default_fuel(),
             wasm_memory_pages: Self::default_memory_pages(),
+            clear_env: Self::default_clear_env(),
         }
     }
 }
@@ -133,9 +155,9 @@ pub trait ModelDims: Send + Sync + 'static {
     const HIDDEN_SIZE: usize = Self::Q_HEADS * Self::HEAD_DIM;
     const INTERMEDIATE_SIZE: usize = 14336;
     const VOCAB_SIZE: usize = 128256;
-    const BLOCK_SIZE: usize = 16;       // tokens per macro-block
-    const SPARSITY_K: usize = 4;        // top-4 sparse codes per token
-    const DICT_SIZE: usize = 512;       // dictionary vectors per KV head
+    const BLOCK_SIZE: usize = 16; // tokens per macro-block
+    const SPARSITY_K: usize = 4; // top-4 sparse codes per token
+    const DICT_SIZE: usize = 512; // dictionary vectors per KV head
 
     /// GQA group size: how many Q heads share one KV head
     const GQA_GROUP: usize = Self::Q_HEADS / Self::KV_HEADS;
@@ -151,7 +173,7 @@ impl ModelDims for Granite2B {
     const LAYERS: usize = 40;
     const Q_HEADS: usize = 32;
     const KV_HEADS: usize = 8;
-    const HEAD_DIM: usize = 64;     // 2048 / 32 = 64
+    const HEAD_DIM: usize = 64; // 2048 / 32 = 64
     const HIDDEN_SIZE: usize = 2048;
     const INTERMEDIATE_SIZE: usize = 8192;
     const VOCAB_SIZE: usize = 49155;
@@ -163,7 +185,7 @@ impl ModelDims for Qwen05B {
     const LAYERS: usize = 24;
     const Q_HEADS: usize = 14;
     const KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 64;     // 896 / 14 = 64
+    const HEAD_DIM: usize = 64; // 896 / 14 = 64
     const HIDDEN_SIZE: usize = 896;
     const INTERMEDIATE_SIZE: usize = 4864;
     const VOCAB_SIZE: usize = 151936;
@@ -175,7 +197,7 @@ impl ModelDims for DeepSeekR1_1_5B {
     const LAYERS: usize = 28;
     const Q_HEADS: usize = 12;
     const KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 128;    // 1536 / 12 = 128
+    const HEAD_DIM: usize = 128; // 1536 / 12 = 128
     const HIDDEN_SIZE: usize = 1536;
     const INTERMEDIATE_SIZE: usize = 8960;
     const VOCAB_SIZE: usize = 151936;
@@ -205,8 +227,6 @@ pub struct SparseCode {
 const _: () = assert!(std::mem::size_of::<SparseCode>() == 16);
 const _: () = assert!(std::mem::align_of::<SparseCode>() == 16);
 
-
-
 impl SparseCode {
     /// Create a zeroed SparseCode (all indices 0, all coefficients 0.0)
     pub const fn zero() -> Self {
@@ -222,8 +242,6 @@ impl Default for SparseCode {
         Self::zero()
     }
 }
-
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Capability IDs – Exhaustive, typed dispatch
@@ -564,7 +582,10 @@ mod tests {
     #[test]
     fn capability_id_from_raw_exhaustive() {
         for i in 0..CapabilityId::COUNT as u32 {
-            assert!(CapabilityId::from_raw(i).is_some(), "Missing CapabilityId for {i}");
+            assert!(
+                CapabilityId::from_raw(i).is_some(),
+                "Missing CapabilityId for {i}"
+            );
         }
         assert!(CapabilityId::from_raw(CapabilityId::COUNT as u32).is_none());
         assert!(CapabilityId::from_raw(u32::MAX).is_none());

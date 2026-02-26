@@ -4,8 +4,8 @@
 //!   embed → (RMSNorm → Attn → Residual → RMSNorm → FFN → Residual) × N → Logits → Sample
 
 use crate::ops::OpsEngine;
-use crate::weight_loader::ModelWeights;
 use crate::tokenizer::Tokenizer;
+use crate::weight_loader::ModelWeights;
 // half::f16 as F16 removed — scaling is now GPU-side via scale_f16 kernel
 use metal::Buffer;
 
@@ -54,7 +54,7 @@ impl InferenceConfig {
             rope_theta: 10000.0,
             rms_norm_eps: 1e-5,
             embedding_multiplier: 12.0,
-            attention_multiplier: 0.015625,  // 1/64
+            attention_multiplier: 0.015625, // 1/64
             residual_multiplier: 0.22,
             logits_scaling: 8.0,
             temperature: 0.7,
@@ -72,7 +72,7 @@ impl InferenceConfig {
             hidden_size: 896,
             q_heads: 14,
             kv_heads: 2,
-            head_dim: 64,       // 896 / 14 = 64
+            head_dim: 64, // 896 / 14 = 64
             intermediate_size: 4864,
             vocab_size: 151936,
             rope_theta: 1000000.0,
@@ -83,7 +83,7 @@ impl InferenceConfig {
             logits_scaling: 1.0,
             temperature: 0.7,
             max_tokens: 256,
-            eos_token_id: 151645,  // <|im_end|>
+            eos_token_id: 151645, // <|im_end|>
             im_end_token_id: 151645,
             model_name: "Qwen 2.5 0.5B Instruct (System 1)".into(),
         }
@@ -96,7 +96,7 @@ impl InferenceConfig {
             hidden_size: 1536,
             q_heads: 12,
             kv_heads: 2,
-            head_dim: 128,      // 1536 / 12 = 128
+            head_dim: 128, // 1536 / 12 = 128
             intermediate_size: 8960,
             vocab_size: 151936,
             rope_theta: 10000.0,
@@ -105,9 +105,9 @@ impl InferenceConfig {
             attention_multiplier: 1.0,
             residual_multiplier: 1.0,
             logits_scaling: 1.0,
-            temperature: 0.6,   // Slightly lower for more focused reasoning
-            max_tokens: 512,    // Longer context for reasoning chains
-            eos_token_id: 151643,  // DeepSeek uses bos_token_id as eos
+            temperature: 0.6,        // Slightly lower for more focused reasoning
+            max_tokens: 512,         // Longer context for reasoning chains
+            eos_token_id: 151643,    // DeepSeek uses bos_token_id as eos
             im_end_token_id: 151645, // <|im_end|>
             model_name: "DeepSeek-R1-Distill-Qwen-1.5B (System 2)".into(),
         }
@@ -131,7 +131,9 @@ impl InferenceConfig {
         let hidden_size = config["hidden_size"].as_u64().unwrap_or(0) as usize;
         let num_layers = config["num_hidden_layers"].as_u64().unwrap_or(0) as usize;
 
-        if (arch == "GraniteForCausalLM" || arch == "LlamaForCausalLM" || model_type == "granite") && hidden_size == 2048 {
+        if (arch == "GraniteForCausalLM" || arch == "LlamaForCausalLM" || model_type == "granite")
+            && hidden_size == 2048
+        {
             println!("[DETECT] Matched: Granite 3.0 2B Instruct");
             Ok(Self::granite_2b())
         } else if arch == "Qwen2ForCausalLM" || model_type == "qwen2" {
@@ -155,7 +157,6 @@ impl InferenceConfig {
         }
     }
 }
-
 
 struct KvCache {
     /// [max_seq, kv_heads * head_dim] f16
@@ -194,7 +195,7 @@ pub struct InferenceEngine {
     ws_k_head_cache: Buffer,
     ws_v_head_cache: Buffer,
     ws_logits: Buffer,
-    
+
     /// Current sequence position
     position: u32,
 }
@@ -222,11 +223,7 @@ impl InferenceEngine {
     pub const MAX_SEQ_LEN: usize = 4096;
 
     /// Create an inference engine, uploading all weights to GPU.
-    pub fn new(
-        ops: OpsEngine,
-        weights: &ModelWeights,
-        config: InferenceConfig,
-    ) -> Self {
+    pub fn new(ops: OpsEngine, weights: &ModelWeights, config: InferenceConfig) -> Self {
         println!("[INFERENCE] Uploading weights to GPU...");
 
         let buf_embed = ops.buffer_f16(&weights.embed_tokens);
@@ -236,7 +233,10 @@ impl InferenceEngine {
         let mut layer_bufs = Vec::with_capacity(config.num_layers);
         for (i, layer) in weights.layers.iter().enumerate() {
             if i % 10 == 0 {
-                println!("[INFERENCE]   Uploading layer {}/{}...", i, config.num_layers);
+                println!(
+                    "[INFERENCE]   Uploading layer {}/{}...",
+                    i, config.num_layers
+                );
             }
             layer_bufs.push(LayerBuffers {
                 q_proj: ops.buffer_f16(&layer.q_proj),
@@ -267,7 +267,10 @@ impl InferenceEngine {
             });
         }
 
-        println!("[INFERENCE] All weights uploaded. KV cache allocated for {} tokens.", max_seq);
+        println!(
+            "[INFERENCE] All weights uploaded. KV cache allocated for {} tokens.",
+            max_seq
+        );
 
         // Workspace sizes
         let h = config.hidden_size as u64;
@@ -327,11 +330,7 @@ impl InferenceEngine {
     }
 
     /// Run inference: given prompt text, generate completion.
-    pub fn generate(
-        &mut self,
-        tokenizer: &Tokenizer,
-        prompt: &str,
-    ) -> Result<String, String> {
+    pub fn generate(&mut self, tokenizer: &Tokenizer, prompt: &str) -> Result<String, String> {
         let _h = self.config.hidden_size as u32;
         let _q_h = self.config.q_heads as u32;
         let _kv_h = self.config.kv_heads as u32;
@@ -360,9 +359,12 @@ impl InferenceEngine {
 
         let prefill_end = std::time::Instant::now();
         let prefill_ms = prefill_end.duration_since(gen_start).as_millis();
-        println!("[PERF] Prefill: {} tokens in {}ms ({:.1} tok/s)", 
-            prompt_ids.len(), prefill_ms, 
-            prompt_ids.len() as f64 / (prefill_ms as f64 / 1000.0));
+        println!(
+            "[PERF] Prefill: {} tokens in {}ms ({:.1} tok/s)",
+            prompt_ids.len(),
+            prefill_ms,
+            prompt_ids.len() as f64 / (prefill_ms as f64 / 1000.0)
+        );
 
         // Autoregressive generation
         let decode_start = std::time::Instant::now();
@@ -370,7 +372,7 @@ impl InferenceEngine {
 
         for step in 0..max_tokens.saturating_sub(1) {
             let last_token = *generated_ids.last().unwrap();
-            
+
             // EOS check (model-specific)
             if last_token == self.config.eos_token_id {
                 break;
@@ -391,11 +393,15 @@ impl InferenceEngine {
 
         let decode_elapsed = decode_start.elapsed();
         let decode_ms = decode_elapsed.as_millis();
-        let tok_per_sec = if decode_ms > 0 { 
-            decode_tokens as f64 / (decode_ms as f64 / 1000.0) 
-        } else { 0.0 };
-        println!("\n[PERF] Decode: {} tokens in {}ms ({:.1} tok/s)", 
-            decode_tokens, decode_ms, tok_per_sec);
+        let tok_per_sec = if decode_ms > 0 {
+            decode_tokens as f64 / (decode_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        println!(
+            "\n[PERF] Decode: {} tokens in {}ms ({:.1} tok/s)",
+            decode_tokens, decode_ms, tok_per_sec
+        );
 
         // Decode the full generation
         let output = tokenizer.decode(&generated_ids)?;
@@ -430,11 +436,11 @@ impl InferenceEngine {
     pub fn retrieve_memory(&self, _query_hidden_state: &[half::f16], _top_k: usize) -> Vec<usize> {
         // In the true Weaver architecture, this is dispatched as a sparse-dense matmul kernel
         // For CPU simulation, we just scan the SparseCodes in the cold pool.
-        
+
         // Return mock indices for now to validate agent wiring without the full GPU indexer
         let mut results = Vec::new();
         if self.config.max_tokens > 0 {
-            results.push(0); 
+            results.push(0);
         }
         results
     }
@@ -444,7 +450,11 @@ impl InferenceEngine {
     fn forward_one_token(
         &mut self,
         token_id: u32,
-        h: u32, q_h: u32, kv_h: u32, hd: u32, inter: u32,
+        h: u32,
+        q_h: u32,
+        kv_h: u32,
+        hd: u32,
+        inter: u32,
     ) -> Result<u32, String> {
         let pos = self.position;
 
@@ -456,7 +466,8 @@ impl InferenceEngine {
             return Err(format!(
                 "KV cache exhausted: position {} >= MAX_SEQ_LEN {}. \
                  Call reset() or increase MAX_SEQ_LEN.",
-                pos, Self::MAX_SEQ_LEN
+                pos,
+                Self::MAX_SEQ_LEN
             ));
         }
 
@@ -474,12 +485,14 @@ impl InferenceEngine {
         unsafe {
             *(self.ws_token.contents() as *mut u32) = token_id;
         }
-        self.ops.embed_lookup(&self.ws_token, &self.buf_embed, &self.ws_hidden, h, 1);
+        self.ops
+            .embed_lookup(&self.ws_token, &self.buf_embed, &self.ws_hidden, h, 1);
 
         // Embedding multiplier (Granite-specific — skip for Qwen where multiplier == 1.0)
         // Uses GPU-side scale_f16 kernel to avoid breaking the batch.
         if self.config.embedding_multiplier != 1.0 {
-            self.ops.scale_f16(&self.ws_hidden, h, self.config.embedding_multiplier);
+            self.ops
+                .scale_f16(&self.ws_hidden, h, self.config.embedding_multiplier);
         }
 
         // 2. Transformer layers — ALL on GPU, no CPU round-trips
@@ -487,18 +500,26 @@ impl InferenceEngine {
             let lb = &self.layer_bufs[layer_idx];
 
             // Save residual (GPU copy)
-            self.ops.copy_buffer(&self.ws_hidden, &self.ws_residual, h, 0, 0);
+            self.ops
+                .copy_buffer(&self.ws_hidden, &self.ws_residual, h, 0, 0);
 
             // Input LayerNorm
             self.ops.rms_norm(
-                &self.ws_hidden, &lb.input_layernorm, &self.ws_norm,
-                h, 1, self.config.rms_norm_eps,
+                &self.ws_hidden,
+                &lb.input_layernorm,
+                &self.ws_norm,
+                h,
+                1,
+                self.config.rms_norm_eps,
             );
 
             // Q/K/V projections
-            self.ops.matmul(&self.ws_norm, &lb.q_proj, &self.ws_q, 1, q_h * hd, h);
-            self.ops.matmul(&self.ws_norm, &lb.k_proj, &self.ws_k, 1, kv_dim, h);
-            self.ops.matmul(&self.ws_norm, &lb.v_proj, &self.ws_v, 1, kv_dim, h);
+            self.ops
+                .matmul(&self.ws_norm, &lb.q_proj, &self.ws_q, 1, q_h * hd, h);
+            self.ops
+                .matmul(&self.ws_norm, &lb.k_proj, &self.ws_k, 1, kv_dim, h);
+            self.ops
+                .matmul(&self.ws_norm, &lb.v_proj, &self.ws_v, 1, kv_dim, h);
 
             // QKV biases (Qwen-style)
             if let Some(ref qb) = lb.q_bias {
@@ -512,70 +533,110 @@ impl InferenceEngine {
             }
 
             // RoPE
-            self.ops.rope(&self.ws_q, &self.ws_k, 1, q_h, kv_h, hd, pos, self.config.rope_theta);
+            self.ops.rope(
+                &self.ws_q,
+                &self.ws_k,
+                1,
+                q_h,
+                kv_h,
+                hd,
+                pos,
+                self.config.rope_theta,
+            );
 
             // Store K/V into cache (GPU copy — no CPU sync needed!)
             let cache = &self.kv_caches[layer_idx];
-            self.ops.copy_buffer(&self.ws_k, &cache.k_cache, kv_dim, 0, kv_elem_offset);
-            self.ops.copy_buffer(&self.ws_v, &cache.v_cache, kv_dim, 0, kv_elem_offset);
+            self.ops
+                .copy_buffer(&self.ws_k, &cache.k_cache, kv_dim, 0, kv_elem_offset);
+            self.ops
+                .copy_buffer(&self.ws_v, &cache.v_cache, kv_dim, 0, kv_elem_offset);
 
             // Multi-head GQA attention
             self.ops.multihead_attention(
-                &self.ws_q, &cache.k_cache, &cache.v_cache, &self.ws_attn_out,
-                kv_len, hd, q_h, kv_h,
+                &self.ws_q,
+                &cache.k_cache,
+                &cache.v_cache,
+                &self.ws_attn_out,
+                kv_len,
+                hd,
+                q_h,
+                kv_h,
             );
 
             // Output projection
-            self.ops.matmul(&self.ws_attn_out, &lb.o_proj, &self.ws_proj, 1, h, q_h * hd);
+            self.ops
+                .matmul(&self.ws_attn_out, &lb.o_proj, &self.ws_proj, 1, h, q_h * hd);
 
             // Residual multiplier for attention path (Granite-specific)
             // Uses GPU-side scale_f16 kernel — no sync point needed.
             if self.config.residual_multiplier != 1.0 {
-                self.ops.scale_f16(&self.ws_proj, h, self.config.residual_multiplier);
+                self.ops
+                    .scale_f16(&self.ws_proj, h, self.config.residual_multiplier);
             }
 
             // hidden = residual + proj (add_residual is in-place: ws_hidden += ws_proj)
             // But ws_hidden was overwritten by rms_norm input! We saved it in ws_residual.
             // Copy residual back to ws_hidden first, then add.
-            self.ops.copy_buffer(&self.ws_residual, &self.ws_hidden, h, 0, 0);
+            self.ops
+                .copy_buffer(&self.ws_residual, &self.ws_hidden, h, 0, 0);
             self.ops.add_residual(&self.ws_hidden, &self.ws_proj, h);
 
             // Save residual for FFN (GPU copy)
-            self.ops.copy_buffer(&self.ws_hidden, &self.ws_residual, h, 0, 0);
+            self.ops
+                .copy_buffer(&self.ws_hidden, &self.ws_residual, h, 0, 0);
 
             // Post-attention LayerNorm
             self.ops.rms_norm(
-                &self.ws_hidden, &lb.post_attention_layernorm, &self.ws_norm,
-                h, 1, self.config.rms_norm_eps,
+                &self.ws_hidden,
+                &lb.post_attention_layernorm,
+                &self.ws_norm,
+                h,
+                1,
+                self.config.rms_norm_eps,
             );
 
             // FFN
-            self.ops.matmul(&self.ws_norm, &lb.gate_proj, &self.ws_gate, 1, inter, h);
-            self.ops.matmul(&self.ws_norm, &lb.up_proj, &self.ws_up, 1, inter, h);
-            self.ops.silu_gate(&self.ws_gate, &self.ws_up, &self.ws_ffn, inter);
-            self.ops.matmul(&self.ws_ffn, &lb.down_proj, &self.ws_down, 1, h, inter);
+            self.ops
+                .matmul(&self.ws_norm, &lb.gate_proj, &self.ws_gate, 1, inter, h);
+            self.ops
+                .matmul(&self.ws_norm, &lb.up_proj, &self.ws_up, 1, inter, h);
+            self.ops
+                .silu_gate(&self.ws_gate, &self.ws_up, &self.ws_ffn, inter);
+            self.ops
+                .matmul(&self.ws_ffn, &lb.down_proj, &self.ws_down, 1, h, inter);
 
             // Residual multiplier for FFN path (Granite-specific)
             // Uses GPU-side scale_f16 kernel — no sync point needed.
             if self.config.residual_multiplier != 1.0 {
-                self.ops.scale_f16(&self.ws_down, h, self.config.residual_multiplier);
+                self.ops
+                    .scale_f16(&self.ws_down, h, self.config.residual_multiplier);
             }
 
             // hidden = residual + down
-            self.ops.copy_buffer(&self.ws_residual, &self.ws_hidden, h, 0, 0);
+            self.ops
+                .copy_buffer(&self.ws_residual, &self.ws_hidden, h, 0, 0);
             self.ops.add_residual(&self.ws_hidden, &self.ws_down, h);
         }
 
         // 3. Final RMSNorm + LM Head
         self.ops.rms_norm(
-            &self.ws_hidden, &self.buf_final_norm, &self.ws_norm,
-            h, 1, self.config.rms_norm_eps,
+            &self.ws_hidden,
+            &self.buf_final_norm,
+            &self.ws_norm,
+            h,
+            1,
+            self.config.rms_norm_eps,
         );
 
         let vocab = self.config.vocab_size as u32;
         self.ops.matmul_scaled(
-            &self.ws_norm, &self.buf_lm_head, &self.ws_logits,
-            1, vocab, h, 1.0 / self.config.logits_scaling,
+            &self.ws_norm,
+            &self.buf_lm_head,
+            &self.ws_logits,
+            1,
+            vocab,
+            h,
+            1.0 / self.config.logits_scaling,
         );
 
         // ══════════════════════════════════════════════════════════════
@@ -625,7 +686,10 @@ fn sample_token(logits: &[f32], temperature: f32) -> u32 {
 }
 
 fn sample_token_advanced(
-    logits: &[f32], temperature: f32, top_p: f32, recent_tokens: &[u32],
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    recent_tokens: &[u32],
 ) -> u32 {
     let mut logits = logits.to_vec();
 
@@ -697,4 +761,3 @@ fn sample_token_advanced(
 
     candidates.last().map(|(idx, _)| *idx as u32).unwrap_or(0)
 }
-

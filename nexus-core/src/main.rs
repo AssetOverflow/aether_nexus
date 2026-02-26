@@ -12,10 +12,10 @@
 //! ```
 
 use nexus_core::agent::AgentLoop;
-use nexus_core::bench::{run_benchmark, BenchConfig};
+use nexus_core::bench::{BenchConfig, run_benchmark};
 use nexus_core::cortex::Cortex;
 use nexus_core::distiller::Distiller;
-use nexus_core::fabric::{create_genesis, Fabric};
+use nexus_core::fabric::{Fabric, create_genesis};
 use nexus_core::inference::{InferenceConfig, InferenceEngine};
 use nexus_core::ops::OpsEngine;
 use nexus_core::tokenizer::Tokenizer;
@@ -57,7 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let aether_path = {
         // Skip args[0] (binary path) and args that are flags or flag values
-        let flag_value_indices: std::collections::HashSet<usize> = args.iter().enumerate()
+        let flag_value_indices: std::collections::HashSet<usize> = args
+            .iter()
+            .enumerate()
             .filter_map(|(i, a)| {
                 if (a == "--generate" || a == "--model" || a == "-m") && i + 1 < args.len() {
                     Some(i + 1)
@@ -66,7 +68,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             })
             .collect();
-        args.iter().enumerate()
+        args.iter()
+            .enumerate()
             .skip(1) // skip binary path
             .find(|(i, a)| !a.starts_with("-") && !flag_value_indices.contains(i))
             .map(|(_, path)| path.clone())
@@ -83,23 +86,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = Path::new("nexus.toml");
     let nexus_config = if config_path.exists() {
         println!("[BOOT] Loading configuration from nexus.toml...");
-        let config_str = std::fs::read_to_string(config_path)
-            .expect("Failed to read nexus.toml");
+        let config_str = std::fs::read_to_string(config_path).expect("Failed to read nexus.toml");
         toml::from_str(&config_str).expect("Failed to parse nexus.toml")
     } else {
         println!("[BOOT] No nexus.toml found. Using default configurations.");
         NexusConfig::default()
     };
 
-    println!("[BOOT] Agent Config: Max Reflection: {}, Max Tokens: {}", 
-             nexus_config.agent.max_reflection_steps, nexus_config.agent.max_tokens);
-    println!("[BOOT] Memory Config: Distill Threshold: {}, REM Interval: {}s",
-             nexus_config.memory.distill_entropy_threshold, nexus_config.memory.rem_interval_secs);
+    println!(
+        "[BOOT] Agent Config: Max Reflection: {}, Max Tokens: {}",
+        nexus_config.agent.max_reflection_steps, nexus_config.agent.max_tokens
+    );
+    println!(
+        "[BOOT] Memory Config: Distill Threshold: {}, REM Interval: {}s",
+        nexus_config.memory.distill_entropy_threshold, nexus_config.memory.rem_interval_secs
+    );
     println!();
 
     // 1. Resolve .aether file path and create genesis if needed
     if !std::path::Path::new(&aether_path).exists() {
-        println!("[GENESIS] No .aether file found at '{}'. Creating genesis...", aether_path);
+        println!(
+            "[GENESIS] No .aether file found at '{}'. Creating genesis...",
+            aether_path
+        );
 
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
@@ -110,7 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         create_genesis::<Llama8B>(&aether_path, &key_pair)?;
 
         println!("[GENESIS] Created signed .aether file at '{}'", aether_path);
-        println!("[GENESIS] Ed25519 public key: {:02x?}", &ring::signature::KeyPair::public_key(&key_pair).as_ref()[..8]);
+        println!(
+            "[GENESIS] Ed25519 public key: {:02x?}",
+            &ring::signature::KeyPair::public_key(&key_pair).as_ref()[..8]
+        );
         println!();
     }
 
@@ -120,19 +132,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_mb = fabric.total_size() / (1024 * 1024);
     println!("[BOOT] Fabric mapped: {} MB", total_mb);
-    println!("[BOOT] Hot pool:  {} MB", fabric.regions.hot_pool_size / (1024 * 1024));
-    println!("[BOOT] Cold pool: {} MB", fabric.regions.cold_pool_size / (1024 * 1024));
+    println!(
+        "[BOOT] Hot pool:  {} MB",
+        fabric.regions.hot_pool_size / (1024 * 1024)
+    );
+    println!(
+        "[BOOT] Cold pool: {} MB",
+        fabric.regions.cold_pool_size / (1024 * 1024)
+    );
     println!("[BOOT] Dictionary: {} KB", fabric.regions.dict_size / 1024);
-    println!("[BOOT] Observation buffers: {} MB", fabric.regions.obs_size / (1024 * 1024));
-    println!("[BOOT] Holographic trace: {} MB", fabric.regions.trace_size / (1024 * 1024));
+    println!(
+        "[BOOT] Observation buffers: {} MB",
+        fabric.regions.obs_size / (1024 * 1024)
+    );
+    println!(
+        "[BOOT] Holographic trace: {} MB",
+        fabric.regions.trace_size / (1024 * 1024)
+    );
     println!();
 
     // 3. Boot the Cortex with sandbox policy
     println!("[CORTEX] Initializing Unified Capability Cortex...");
-    let sandbox_policy = nexus_core::sandbox::SandboxPolicy::from_config(&nexus_config.security);
+    let sandbox_policy = if config_path.exists() {
+        nexus_core::sandbox::SandboxPolicy::from_config(&nexus_config.security)
+    } else {
+        println!("[CORTEX] Using permissive DEV default sandbox policy for the agent.");
+        nexus_core::sandbox::SandboxPolicy::dev_default()
+    };
     println!("[CORTEX] Sandbox policy: {:?}", sandbox_policy);
     let mut cortex = nexus_core::cortex::Cortex::boot(sandbox_policy);
-    println!("[CORTEX] {} capabilities registered", cortex.capability_count());
+    println!(
+        "[CORTEX] {} capabilities registered",
+        cortex.capability_count()
+    );
     println!("[CORTEX] {:?}", cortex);
     println!();
 
@@ -143,7 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match WeaverEngine::new(path) {
             Ok(engine) => {
                 println!("[WEAVER] Device: {}", engine.device_name());
-                println!("[WEAVER] Max threads/threadgroup: {}", engine.max_threads_per_threadgroup());
+                println!(
+                    "[WEAVER] Max threads/threadgroup: {}",
+                    engine.max_threads_per_threadgroup()
+                );
                 println!();
                 Some(engine)
             }
@@ -179,8 +214,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
 
             let config = BenchConfig::default();
-            let results = run_benchmark(engine, &config)
-                .map_err(|e| format!("Benchmark failed: {}", e))?;
+            let results =
+                run_benchmark(engine, &config).map_err(|e| format!("Benchmark failed: {}", e))?;
 
             println!("{}", results);
         } else {
@@ -199,8 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ops_metallib = option_env!("OPS_METALLIB");
         if let Some(ops_path) = ops_metallib {
             println!("[OPS] Loading ops metallib from '{}'...", ops_path);
-            let ops = OpsEngine::new(ops_path)
-                .map_err(|e| format!("Ops engine init failed: {}", e))?;
+            let ops =
+                OpsEngine::new(ops_path).map_err(|e| format!("Ops engine init failed: {}", e))?;
 
             println!("[TOKENIZER] Loading tokenizer...");
             let tokenizer = Tokenizer::from_dir(&model_dir)
@@ -212,15 +247,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Model detection failed: {}", e))?;
             config.max_tokens = nexus_config.agent.max_tokens; // Override from nexus.toml
             println!("[MODEL] Loaded: {}", config.model_name);
-            println!("[MODEL] Architecture: {}h x {}L, {} heads, vocab {}, EOS={}",
-                config.hidden_size, config.num_layers, config.q_heads, config.vocab_size, config.eos_token_id);
-            
+            println!(
+                "[MODEL] Architecture: {}h x {}L, {} heads, vocab {}, EOS={}",
+                config.hidden_size,
+                config.num_layers,
+                config.q_heads,
+                config.vocab_size,
+                config.eos_token_id
+            );
+
             // ─── Unified Weight Loading ─────────────────────────────────────
             // Priority: Fabric (brain.aether) → safetensors (models/**) → error
             // If loading from safetensors, auto-embed into Fabric for next boot.
             let weights = if fabric.weights_embedded() {
                 println!("[WEIGHTS] Loading from brain.aether (Fabric-embedded)");
-                let (num_layers, has_biases) = fabric.weight_manifest()
+                let (num_layers, has_biases) = fabric
+                    .weight_manifest()
                     .ok_or("Fabric has WGHT magic but corrupt manifest")?;
                 load_weights_from_fabric(
                     fabric.weight_data(),
@@ -232,7 +274,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     config.head_dim,
                     config.intermediate_size,
                     config.vocab_size,
-                ).map_err(|e| format!("Fabric weight load failed: {}", e))?
+                )
+                .map_err(|e| format!("Fabric weight load failed: {}", e))?
             } else {
                 println!("[WEIGHTS] No embedded weights in Fabric — loading from safetensors");
                 let w = load_weights(&model_dir, config.num_layers)
@@ -245,8 +288,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("[WARN] Failed to embed weights into Fabric: {}", e);
                     eprintln!("[WARN] Weights will be loaded from safetensors on next boot");
                 } else {
-                    fabric.force_checkpoint()
-                        .unwrap_or_else(|e| eprintln!("[WARN] Checkpoint after embed failed: {}", e));
+                    fabric.force_checkpoint().unwrap_or_else(|e| {
+                        eprintln!("[WARN] Checkpoint after embed failed: {}", e)
+                    });
                     println!("[WEIGHTS] Weights embedded — models/** no longer needed at runtime");
                 }
 
@@ -266,15 +310,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (tx, rx) = std::sync::mpsc::channel::<String>();
             let fabric_arc = Arc::new(tokio::sync::Mutex::new(fabric));
             let distill_memory_config = nexus_config.memory.clone();
-            
+
             let mut distiller = Distiller::<Llama8B>::new(distill_memory_config);
             let fabric_distiller_arc = fabric_arc.clone();
-            
+
             // Spawns the background REM cycle thread
             tokio::spawn(async move {
                 distiller.run(fabric_distiller_arc).await;
             });
-            
+
             std::thread::spawn(move || {
                 let stdin = std::io::stdin();
                 for line in stdin.lines() {
@@ -286,18 +330,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            let mut agent = AgentLoop::new(&mut engine, &tokenizer, &mut cortex, rx, nexus_config.agent.max_reflection_steps);
+            let mut agent = AgentLoop::new(
+                &mut engine,
+                &tokenizer,
+                &mut cortex,
+                rx,
+                nexus_config.agent.max_reflection_steps,
+            );
             let output = agent.run(persona, prompt).map_err(|e| e.to_string())?;
 
             println!();
             println!("──────────────────────────────────────────────────");
             println!();
-            
+
             println!("[TRACE] Archiving successful trajectory into Holographic Trace...");
             {
                 let mut fab = fabric_arc.lock().await;
                 fab.append_trace(&output);
-                fab.checkpoint().map_err(|e| format!("Checkpoint flush failed: {:?}", e))?;
+                fab.checkpoint()
+                    .map_err(|e| format!("Checkpoint flush failed: {:?}", e))?;
             }
         } else {
             println!("⚠️  OPS_METALLIB not set. Cannot run inference.");

@@ -59,7 +59,12 @@ pub trait Capability: Send + Sync + 'static {
     /// # Returns
     ///
     /// The result to be written back into the Fabric, or a `CortexError`.
-    fn execute(args: Self::Args, arg_buf: &[u8], res_buf: &mut [u8], policy: &SandboxPolicy) -> Result<Self::Result, CortexError>;
+    fn execute(
+        args: Self::Args,
+        arg_buf: &[u8],
+        res_buf: &mut [u8],
+        policy: &SandboxPolicy,
+    ) -> Result<Self::Result, CortexError>;
 }
 
 /// Type-erased handler function signature used in the Cortex dispatch map.
@@ -76,35 +81,37 @@ pub type HandlerFn =
 /// 2. Calls `execute` with the sandbox policy
 /// 3. Casts the result back to bytes and writes to the result slice
 pub fn make_handler<C: Capability>() -> HandlerFn {
-    Box::new(|arg_bytes: &[u8], res_bytes: &mut [u8], policy: &SandboxPolicy| {
-        // Validate arg size
-        let arg_size = std::mem::size_of::<C::Args>();
-        if arg_bytes.len() < arg_size {
-            return Err(CortexError::ArgOutOfBounds {
-                offset: 0,
-                size: arg_bytes.len(),
-            });
-        }
+    Box::new(
+        |arg_bytes: &[u8], res_bytes: &mut [u8], policy: &SandboxPolicy| {
+            // Validate arg size
+            let arg_size = std::mem::size_of::<C::Args>();
+            if arg_bytes.len() < arg_size {
+                return Err(CortexError::ArgOutOfBounds {
+                    offset: 0,
+                    size: arg_bytes.len(),
+                });
+            }
 
-        // Zero-copy cast from bytes → Args
-        let args: &C::Args = bytemuck::from_bytes(&arg_bytes[..arg_size]);
+            // Zero-copy cast from bytes → Args
+            let args: &C::Args = bytemuck::from_bytes(&arg_bytes[..arg_size]);
 
-        // Execute the capability with sandbox policy
-        let result = C::execute(*args, arg_bytes, res_bytes, policy)?;
+            // Execute the capability with sandbox policy
+            let result = C::execute(*args, arg_bytes, res_bytes, policy)?;
 
-        // Write result back to result slice
-        let result_bytes = bytemuck::bytes_of(&result);
-        let result_size = result_bytes.len();
-        if res_bytes.len() < result_size {
-            return Err(CortexError::ResultOutOfBounds {
-                offset: 0,
-                size: res_bytes.len(),
-            });
-        }
-        res_bytes[..result_size].copy_from_slice(result_bytes);
+            // Write result back to result slice
+            let result_bytes = bytemuck::bytes_of(&result);
+            let result_size = result_bytes.len();
+            if res_bytes.len() < result_size {
+                return Err(CortexError::ResultOutOfBounds {
+                    offset: 0,
+                    size: res_bytes.len(),
+                });
+            }
+            res_bytes[..result_size].copy_from_slice(result_bytes);
 
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 
 /// Macro to register a capability with the Cortex.
@@ -113,7 +120,9 @@ pub fn make_handler<C: Capability>() -> HandlerFn {
 #[macro_export]
 macro_rules! register_capability {
     ($cortex:expr, $cap:ty) => {
-        $cortex.register(<$cap as $crate::capability::Capability>::ID,
-                         $crate::capability::make_handler::<$cap>());
+        $cortex.register(
+            <$cap as $crate::capability::Capability>::ID,
+            $crate::capability::make_handler::<$cap>(),
+        );
     };
 }

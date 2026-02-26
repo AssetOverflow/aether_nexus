@@ -28,7 +28,8 @@ impl Tokenizer {
 
     /// Encode text into token IDs.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, String> {
-        let encoding = self.inner
+        let encoding = self
+            .inner
             .encode(text, false)
             .map_err(|e| format!("Encoding failed: {}", e))?;
         Ok(encoding.get_ids().to_vec())
@@ -48,7 +49,8 @@ impl Tokenizer {
 
     /// Encode text and return both IDs and tokens.
     pub fn encode_with_tokens(&self, text: &str) -> Result<(Vec<u32>, Vec<String>), String> {
-        let encoding = self.inner
+        let encoding = self
+            .inner
             .encode(text, false)
             .map_err(|e| format!("Encoding failed: {}", e))?;
         let ids = encoding.get_ids().to_vec();
@@ -69,7 +71,10 @@ mod tests {
     fn tokenizer_roundtrip() {
         let model_dir = "models/inference/granite-2b-instruct";
         if !std::path::Path::new(&format!("{}/tokenizer.json", model_dir)).exists() {
-            eprintln!("Model not found at '{}' — skipping tokenizer test", model_dir);
+            eprintln!(
+                "Model not found at '{}' — skipping tokenizer test",
+                model_dir
+            );
             return;
         }
 

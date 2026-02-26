@@ -92,8 +92,7 @@ impl WeaverEngine {
             .get_function("weaver_decode", None)
             .map_err(|e| format!("Failed to load weaver_decode function: {}", e))?;
 
-        let pipeline = device
-            .new_compute_pipeline_state_with_function(&function)?;
+        let pipeline = device.new_compute_pipeline_state_with_function(&function)?;
 
         let queue = device.new_command_queue();
 
@@ -101,24 +100,30 @@ impl WeaverEngine {
         let opts = MTLResourceOptions::StorageModeShared;
         let sc_size = std::mem::size_of::<SparseCode>() as u64;
 
-        let cap_q_exact    = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
-        let cap_q_latent   = Self::INIT_Q_HEADS * Self::INIT_DICT_SIZE * 2;
-        let cap_hot_pool   = Self::INIT_MAX_HOT_TOKENS * Self::INIT_KV_HEADS * Self::INIT_HEAD_DIM * 2;
-        let cap_cold_pool  = Self::INIT_MAX_COLD_TOKENS * Self::INIT_KV_HEADS * sc_size;
-        let cap_loom_refs  = Self::INIT_MAX_TOTAL_BLOCKS * 4;
-        let cap_output     = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_q_exact = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_q_latent = Self::INIT_Q_HEADS * Self::INIT_DICT_SIZE * 2;
+        let cap_hot_pool =
+            Self::INIT_MAX_HOT_TOKENS * Self::INIT_KV_HEADS * Self::INIT_HEAD_DIM * 2;
+        let cap_cold_pool = Self::INIT_MAX_COLD_TOKENS * Self::INIT_KV_HEADS * sc_size;
+        let cap_loom_refs = Self::INIT_MAX_TOTAL_BLOCKS * 4;
+        let cap_output = Self::INIT_Q_HEADS * Self::INIT_HEAD_DIM * 2;
         let cap_dictionary = Self::INIT_KV_HEADS * Self::INIT_DICT_SIZE * Self::INIT_HEAD_DIM * 2;
 
         Ok(Self {
-            buf_q_exact:    device.new_buffer(cap_q_exact,    opts),
-            buf_q_latent:   device.new_buffer(cap_q_latent,   opts),
-            buf_hot_pool:   device.new_buffer(cap_hot_pool,   opts),
-            buf_cold_pool:  device.new_buffer(cap_cold_pool,  opts),
-            buf_loom_refs:  device.new_buffer(cap_loom_refs,  opts),
-            buf_output:     device.new_buffer(cap_output,     opts),
+            buf_q_exact: device.new_buffer(cap_q_exact, opts),
+            buf_q_latent: device.new_buffer(cap_q_latent, opts),
+            buf_hot_pool: device.new_buffer(cap_hot_pool, opts),
+            buf_cold_pool: device.new_buffer(cap_cold_pool, opts),
+            buf_loom_refs: device.new_buffer(cap_loom_refs, opts),
+            buf_output: device.new_buffer(cap_output, opts),
             buf_dictionary: device.new_buffer(cap_dictionary, opts),
-            cap_q_exact, cap_q_latent, cap_hot_pool, cap_cold_pool,
-            cap_loom_refs, cap_output, cap_dictionary,
+            cap_q_exact,
+            cap_q_latent,
+            cap_hot_pool,
+            cap_cold_pool,
+            cap_loom_refs,
+            cap_output,
+            cap_dictionary,
             device,
             queue,
             pipeline,
@@ -147,12 +152,48 @@ impl WeaverEngine {
         let opts = MTLResourceOptions::StorageModeShared;
 
         // Copy input data into persistent buffers, reallocating only on overflow.
-        Self::fill_f16(&mut self.buf_q_exact,    &mut self.cap_q_exact,    q_exact,     &self.device, opts);
-        Self::fill_f16(&mut self.buf_q_latent,   &mut self.cap_q_latent,   q_latent,    &self.device, opts);
-        Self::fill_f16(&mut self.buf_hot_pool,   &mut self.cap_hot_pool,   hot_pool,    &self.device, opts);
-        Self::fill_sparse(&mut self.buf_cold_pool, &mut self.cap_cold_pool, cold_pool,  &self.device, opts);
-        Self::fill_u32(&mut self.buf_loom_refs,  &mut self.cap_loom_refs,  loom_refs,   &self.device, opts);
-        Self::fill_f16(&mut self.buf_dictionary, &mut self.cap_dictionary, dictionary,  &self.device, opts);
+        Self::fill_f16(
+            &mut self.buf_q_exact,
+            &mut self.cap_q_exact,
+            q_exact,
+            &self.device,
+            opts,
+        );
+        Self::fill_f16(
+            &mut self.buf_q_latent,
+            &mut self.cap_q_latent,
+            q_latent,
+            &self.device,
+            opts,
+        );
+        Self::fill_f16(
+            &mut self.buf_hot_pool,
+            &mut self.cap_hot_pool,
+            hot_pool,
+            &self.device,
+            opts,
+        );
+        Self::fill_sparse(
+            &mut self.buf_cold_pool,
+            &mut self.cap_cold_pool,
+            cold_pool,
+            &self.device,
+            opts,
+        );
+        Self::fill_u32(
+            &mut self.buf_loom_refs,
+            &mut self.cap_loom_refs,
+            loom_refs,
+            &self.device,
+            opts,
+        );
+        Self::fill_f16(
+            &mut self.buf_dictionary,
+            &mut self.cap_dictionary,
+            dictionary,
+            &self.device,
+            opts,
+        );
 
         // Ensure output buffer is large enough
         let output_bytes = (output_size * std::mem::size_of::<F16>()) as u64;
@@ -166,12 +207,12 @@ impl WeaverEngine {
         let encoder = cmd_buf.new_compute_command_encoder();
 
         encoder.set_compute_pipeline_state(&self.pipeline);
-        encoder.set_buffer(0, Some(&self.buf_q_exact),    0);
-        encoder.set_buffer(1, Some(&self.buf_q_latent),   0);
-        encoder.set_buffer(2, Some(&self.buf_hot_pool),   0);
-        encoder.set_buffer(3, Some(&self.buf_cold_pool),  0);
-        encoder.set_buffer(4, Some(&self.buf_loom_refs),  0);
-        encoder.set_buffer(5, Some(&self.buf_output),     0);
+        encoder.set_buffer(0, Some(&self.buf_q_exact), 0);
+        encoder.set_buffer(1, Some(&self.buf_q_latent), 0);
+        encoder.set_buffer(2, Some(&self.buf_hot_pool), 0);
+        encoder.set_buffer(3, Some(&self.buf_cold_pool), 0);
+        encoder.set_buffer(4, Some(&self.buf_loom_refs), 0);
+        encoder.set_buffer(5, Some(&self.buf_output), 0);
 
         let params_ptr = params as *const WeaverParams as *const c_void;
         let params_size = std::mem::size_of::<WeaverParams>() as u64;
@@ -190,30 +231,83 @@ impl WeaverEngine {
         let output_ptr = self.buf_output.contents() as *const F16;
         let output_slice = unsafe { std::slice::from_raw_parts(output_ptr, output_size) };
 
-        Ok(DecodeOutput { data: output_slice.to_vec() })
+        Ok(DecodeOutput {
+            data: output_slice.to_vec(),
+        })
     }
 
     // ─── Persistent buffer fill helpers ──────────────────────────────────
 
-    fn fill_f16(buf: &mut Buffer, cap: &mut u64, data: &[F16], dev: &Device, opts: MTLResourceOptions) {
+    fn fill_f16(
+        buf: &mut Buffer,
+        cap: &mut u64,
+        data: &[F16],
+        dev: &Device,
+        opts: MTLResourceOptions,
+    ) {
         let needed = (data.len() * 2) as u64;
-        if needed == 0 { return; }
-        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
+        if needed == 0 {
+            return;
+        }
+        if needed > *cap || *cap == 0 {
+            *buf = dev.new_buffer(needed, opts);
+            *cap = needed;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr() as *const u8,
+                buf.contents() as *mut u8,
+                needed as usize,
+            );
+        }
     }
 
-    fn fill_u32(buf: &mut Buffer, cap: &mut u64, data: &[u32], dev: &Device, opts: MTLResourceOptions) {
+    fn fill_u32(
+        buf: &mut Buffer,
+        cap: &mut u64,
+        data: &[u32],
+        dev: &Device,
+        opts: MTLResourceOptions,
+    ) {
         let needed = (data.len() * 4) as u64;
-        if needed == 0 { return; }
-        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
+        if needed == 0 {
+            return;
+        }
+        if needed > *cap || *cap == 0 {
+            *buf = dev.new_buffer(needed, opts);
+            *cap = needed;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr() as *const u8,
+                buf.contents() as *mut u8,
+                needed as usize,
+            );
+        }
     }
 
-    fn fill_sparse(buf: &mut Buffer, cap: &mut u64, data: &[SparseCode], dev: &Device, opts: MTLResourceOptions) {
+    fn fill_sparse(
+        buf: &mut Buffer,
+        cap: &mut u64,
+        data: &[SparseCode],
+        dev: &Device,
+        opts: MTLResourceOptions,
+    ) {
         let needed = (data.len() * std::mem::size_of::<SparseCode>()) as u64;
-        if needed == 0 { return; }
-        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
+        if needed == 0 {
+            return;
+        }
+        if needed > *cap || *cap == 0 {
+            *buf = dev.new_buffer(needed, opts);
+            *cap = needed;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr() as *const u8,
+                buf.contents() as *mut u8,
+                needed as usize,
+            );
+        }
     }
 
     /// Get the Metal device name
@@ -246,11 +340,18 @@ mod tests {
         }
 
         let engine = WeaverEngine::new(metallib_path.unwrap());
-        assert!(engine.is_ok(), "Pipeline creation failed: {:?}", engine.err());
+        assert!(
+            engine.is_ok(),
+            "Pipeline creation failed: {:?}",
+            engine.err()
+        );
 
         let engine = engine.unwrap();
         println!("Device: {}", engine.device_name());
-        println!("Max threads/threadgroup: {}", engine.max_threads_per_threadgroup());
+        println!(
+            "Max threads/threadgroup: {}",
+            engine.max_threads_per_threadgroup()
+        );
         assert!(engine.max_threads_per_threadgroup() >= 32);
     }
 
@@ -295,8 +396,13 @@ mod tests {
         };
 
         let result = engine.decode(
-            &q_exact, &q_latent, &hot_pool, &cold_codes,
-            &loom_refs, &dictionary, &params,
+            &q_exact,
+            &q_latent,
+            &hot_pool,
+            &cold_codes,
+            &loom_refs,
+            &dictionary,
+            &params,
         );
 
         assert!(result.is_ok(), "Decode failed: {:?}", result.err());

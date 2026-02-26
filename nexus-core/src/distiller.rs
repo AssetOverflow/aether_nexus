@@ -19,14 +19,12 @@
 //! updated to pin the computation to the ANE.
 
 use crate::fabric::Fabric;
-use crate::types::{
-    ModelDims, SparseCode, MemoryConfig
-};
+use crate::types::{MemoryConfig, ModelDims, SparseCode};
 
 use half::f16;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Distiller
@@ -68,7 +66,7 @@ impl<D: ModelDims> Distiller<D> {
                 let fab = fabric.lock().await;
                 self.evaluate_entropy(&fab)
             };
-            
+
             if !candidates.is_empty() {
                 // 2. Distill candidates (locking individually to allow inference to interleave)
                 for block_idx in candidates {
@@ -100,19 +98,19 @@ impl<D: ModelDims> Distiller<D> {
         let mut candidates = Vec::new();
         // Determine number of active hot blocks
         // Using radix metadata (assuming radix block 0 maps to hot block 0)
-        let num_blocks = fabric.regions.hot_pool_size
-            / (D::BLOCK_SIZE * D::KV_HEADS * D::HEAD_DIM * 2);
-        
+        let num_blocks =
+            fabric.regions.hot_pool_size / (D::BLOCK_SIZE * D::KV_HEADS * D::HEAD_DIM * 2);
+
         let block_byte_size = D::BLOCK_SIZE * D::KV_HEADS * D::HEAD_DIM * 2;
         let hot_pool = fabric.hot_pool();
 
         for block_idx in 0..num_blocks.min(8192) {
             let offset = block_idx * block_byte_size;
             let block_data = &hot_pool[offset..offset + block_byte_size];
-            
+
             // Heuristic ANE computation
             let entropy = Self::compute_block_entropy(block_data);
-            
+
             // Distill if entropy is low (but > 0 to ignore empty zero blocks)
             if entropy < self.config.distill_entropy_threshold && entropy > 0.0 {
                 candidates.push(block_idx);
@@ -188,11 +186,11 @@ impl<D: ModelDims> Distiller<D> {
         // Perform dictionary projection and top-K selection for each token & head
         // Note: CPU bound for now, in a full release this is an ANE/GPU kernel
         let mut sparse_codes = Vec::with_capacity(codes_per_block);
-        
+
         // We read from the view before taking mutable access to the fabric's cold pool
         let hot_bytes = fabric.hot_pool();
         let dict_bytes = fabric.dictionary();
-        
+
         let hot_base = block_idx * codes_per_block * head_dim * 2;
 
         for i in 0..codes_per_block {
@@ -202,22 +200,27 @@ impl<D: ModelDims> Distiller<D> {
 
             let head_idx = i % D::KV_HEADS;
             let dict_head_offset = head_idx * dict_size * head_dim * 2;
-            
+
             // 1. Compute dot products with all dictionary vectors for this head
             let mut scores: Vec<(usize, f32)> = Vec::with_capacity(dict_size);
             for d in 0..dict_size {
                 let d_off = dict_head_offset + d * head_dim * 2;
                 // If dictionary is empty/zeroes (e.g. genesis), this will naturally yield 0.0
-                let dict_vec: &[f16] = bytemuck::cast_slice(&dict_bytes[d_off..d_off + head_dim * 2]);
-                
-                let dot: f32 = token_f16.iter().zip(dict_vec.iter())
+                let dict_vec: &[f16] =
+                    bytemuck::cast_slice(&dict_bytes[d_off..d_off + head_dim * 2]);
+
+                let dot: f32 = token_f16
+                    .iter()
+                    .zip(dict_vec.iter())
                     .map(|(a, b)| f32::from(*a) * f32::from(*b))
                     .sum();
                 scores.push((d, dot));
             }
 
             // 2. Top-K selection (K = 4)
-            scores.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scores.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let mut code = SparseCode::zero();
             for k in 0..4 {
@@ -250,8 +253,8 @@ impl<D: ModelDims> Distiller<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Llama8B;
     use crate::fabric::create_genesis;
+    use crate::types::Llama8B;
     use ring::rand::SystemRandom;
     use ring::signature::Ed25519KeyPair;
 
@@ -295,9 +298,13 @@ mod tests {
         // Verify cold pool has SparseCode written
         let codes = fabric.cold_pool_codes();
         let first = codes[0].indices;
-        // With a zeroed dictionary (genesis), the first 4 indices (0,1,2,3) 
+        // With a zeroed dictionary (genesis), the first 4 indices (0,1,2,3)
         // will have equal 0.0 scores and be selected as top-K.
-        assert_eq!(first, [0, 1, 2, 3], "distilled code should have top-4 indices");
+        assert_eq!(
+            first,
+            [0, 1, 2, 3],
+            "distilled code should have top-4 indices"
+        );
 
         let _ = std::fs::remove_file(&tmp);
     }

@@ -42,53 +42,53 @@
 //! └──────────────────────────────────────────────┘
 //! ```
 
-pub mod types;
-pub mod fabric;
+pub mod agent;
+pub mod bench;
 pub mod capability;
 pub mod cortex;
 pub mod distiller;
-pub mod weaver;
-pub mod bench;
-pub mod weight_loader;
-pub mod tokenizer;
-pub mod ops;
+pub mod fabric;
 pub mod inference;
-pub mod agent;
+pub mod ops;
 pub mod sandbox;
+pub mod tokenizer;
+pub mod types;
+pub mod weaver;
+pub mod weight_loader;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public re-exports
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub use types::{
-    // Model geometry
-    ModelDims,
-    Llama8B,
-    Granite2B,
-    Qwen05B,
-    DeepSeekR1_1_5B,
-    // Memory types
-    SparseCode,
-    LoomDescriptor,
-    Persona,
+    CHECKPOINT_INTERVAL_MS,
     // Capability system
     CapabilityId,
     CortexError,
-    // Configuration
-    SecurityConfig,
+    DISTILL_ENTROPY_THRESHOLD,
+    DeepSeekR1_1_5B,
+    FORMAT_VERSION,
     // Fabric
     FabricError,
     FabricLayout,
-    WeaverParams,
+    Granite2B,
     // Constants
     HEADER_MAGIC,
-    FORMAT_VERSION,
-    SIGNATURE_LEN,
+    Llama8B,
+    LoomDescriptor,
     MAX_RESULT_SIZE,
-    CHECKPOINT_INTERVAL_MS,
+    // Model geometry
+    ModelDims,
+    Persona,
+    Qwen05B,
     REM_INTERVAL_SECS,
-    DISTILL_ENTROPY_THRESHOLD,
+    SIGNATURE_LEN,
+    // Configuration
+    SecurityConfig,
+    // Memory types
+    SparseCode,
+    WeaverParams,
 };
 
-pub use fabric::{Fabric, FabricRegions, create_genesis};
 pub use agent::AgentLoop;
+pub use fabric::{Fabric, FabricRegions, create_genesis};

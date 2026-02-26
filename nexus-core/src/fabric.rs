@@ -30,13 +30,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use half::f16;
 use memmap2::MmapMut;
 use ring::signature;
-use half::f16;
 
 use crate::types::{
-    FabricError, FabricLayout, LoomDescriptor, ModelDims, Persona, SparseCode,
-    HEADER_MAGIC, FORMAT_VERSION, SIGNATURE_LEN, CHECKPOINT_INTERVAL_MS,
+    CHECKPOINT_INTERVAL_MS, FORMAT_VERSION, FabricError, FabricLayout, HEADER_MAGIC,
+    LoomDescriptor, ModelDims, Persona, SIGNATURE_LEN, SparseCode,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,11 +130,8 @@ impl FabricRegions {
 
         // Hot KV Pool: [MAX_HOT_BLOCKS * BLOCK_SIZE * KV_HEADS * HEAD_DIM * 2 bytes (f16)]
         let hot_pool_offset = align_up(weights_offset + weights_size, 16384);
-        let hot_pool_size = FabricLayout::MAX_HOT_BLOCKS
-            * D::BLOCK_SIZE
-            * D::KV_HEADS
-            * D::HEAD_DIM
-            * 2; // f16 = 2 bytes
+        let hot_pool_size =
+            FabricLayout::MAX_HOT_BLOCKS * D::BLOCK_SIZE * D::KV_HEADS * D::HEAD_DIM * 2; // f16 = 2 bytes
 
         // Cold KV Pool: [MAX_COLD_BLOCKS * BLOCK_SIZE * KV_HEADS * sizeof(SparseCode)]
         let cold_pool_offset = align_up(hot_pool_offset + hot_pool_size, 16384);
@@ -198,9 +195,10 @@ impl FabricRegions {
         let kv_h = D::KV_HEADS;
         let q_h = D::Q_HEADS;
         let hd = D::HEAD_DIM;
-        
-        let per_layer = 2 * (
-            q_h * hd * h      // q_proj
+
+        let per_layer = 2
+            * (
+                q_h * hd * h      // q_proj
             + kv_h * hd * h   // k_proj
             + kv_h * hd * h   // v_proj
             + q_h * hd * h    // o_proj
@@ -208,8 +206,9 @@ impl FabricRegions {
             + h * inter       // up_proj
             + inter * h       // down_proj
             + h               // input_layernorm
-            + h               // post_attention_layernorm
-        );
+            + h
+                // post_attention_layernorm
+            );
         let global = 2 * (vocab * h + h); // embed_tokens + final_norm
         layers * per_layer + global
     }
@@ -272,10 +271,7 @@ impl<D: ModelDims> Fabric<D> {
         let path = Path::new(path);
 
         // Open for read+write (checkpoint writes)
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let regions = FabricRegions::compute::<D>();
 
@@ -311,17 +307,15 @@ impl<D: ModelDims> Fabric<D> {
         // Signature verification based on BootMode
         match &mode {
             BootMode::Dev => {
-                eprintln!("[WARN] Booting in DEV mode — signature verification SKIPPED");
+                // In dev mode, we intentionally skip signature verification.
+                // Removed the noisy warning since dev is the default workflow.
             }
             BootMode::Verified { public_key } => {
                 let data_end = regions.total_size - SIGNATURE_LEN;
                 let sig_start = data_end;
                 let sig_end = data_end + SIGNATURE_LEN;
 
-                let public_key = signature::UnparsedPublicKey::new(
-                    &signature::ED25519,
-                    public_key,
-                );
+                let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key);
 
                 public_key
                     .verify(&mmap[..data_end], &mmap[sig_start..sig_end])
@@ -348,7 +342,8 @@ impl<D: ModelDims> Fabric<D> {
 
     /// Read-only view of the model weights region
     pub fn weights(&self) -> &[u8] {
-        &self.mmap[self.regions.weights_offset..self.regions.weights_offset + self.regions.weights_size]
+        &self.mmap
+            [self.regions.weights_offset..self.regions.weights_offset + self.regions.weights_size]
     }
 
     /// Read-only view of the model weights region as f16
@@ -359,12 +354,14 @@ impl<D: ModelDims> Fabric<D> {
 
     /// Read-only view of the hot KV pool
     pub fn hot_pool(&self) -> &[u8] {
-        &self.mmap[self.regions.hot_pool_offset..self.regions.hot_pool_offset + self.regions.hot_pool_size]
+        &self.mmap[self.regions.hot_pool_offset
+            ..self.regions.hot_pool_offset + self.regions.hot_pool_size]
     }
 
     /// Read-only view of the cold KV pool (SparseCode blocks)
     pub fn cold_pool(&self) -> &[u8] {
-        &self.mmap[self.regions.cold_pool_offset..self.regions.cold_pool_offset + self.regions.cold_pool_size]
+        &self.mmap[self.regions.cold_pool_offset
+            ..self.regions.cold_pool_offset + self.regions.cold_pool_size]
     }
 
     /// The cold pool reinterpreted as SparseCode slice
@@ -425,24 +422,24 @@ impl<D: ModelDims> Fabric<D> {
         let record_bytes = record.as_bytes();
         let len = record_bytes.len();
         let trace_size = self.regions.trace_size;
-        
+
         if len == 0 || len > trace_size - 4 {
             return; // Too big or empty
         }
 
         let trace_buf = self.trace_log_mut();
-        
+
         let mut cursor_bytes = [0u8; 4];
         cursor_bytes.copy_from_slice(&trace_buf[0..4]);
         let mut cursor = u32::from_le_bytes(cursor_bytes) as usize;
-        
+
         if cursor < 4 || cursor + len > trace_size {
             cursor = 4; // Reset to beginning
         }
-        
+
         trace_buf[cursor..cursor + len].copy_from_slice(record_bytes);
         cursor += len;
-        
+
         trace_buf[0..4].copy_from_slice(&(cursor as u32).to_le_bytes());
         self.dirty.store(true, Ordering::Release);
     }
@@ -498,10 +495,7 @@ impl<D: ModelDims> Fabric<D> {
     /// The signature covers all bytes from offset 0 to (total_size - SIGNATURE_LEN).
     /// The signature itself is stored in the last SIGNATURE_LEN bytes.
     pub fn verify_signature(&self, public_key_bytes: &[u8]) -> Result<(), FabricError> {
-        let public_key = signature::UnparsedPublicKey::new(
-            &signature::ED25519,
-            public_key_bytes,
-        );
+        let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
 
         let data_end = self.regions.total_size - SIGNATURE_LEN;
         let sig_start = data_end;
@@ -634,7 +628,8 @@ impl<D: ModelDims> Fabric<D> {
         if header_plus_data > self.regions.weights_size {
             return Err(FabricError::LayoutMismatch(format!(
                 "Weight data ({} bytes) + header exceeds weights region ({} bytes)",
-                weight_bytes.len(), self.regions.weights_size
+                weight_bytes.len(),
+                self.regions.weights_size
             )));
         }
 
@@ -657,12 +652,15 @@ impl<D: ModelDims> Fabric<D> {
 
         // Write tensor data
         let data_start = base + Self::WEIGHT_HEADER_SIZE;
-        self.mmap[data_start..data_start + weight_bytes.len()]
-            .copy_from_slice(weight_bytes);
+        self.mmap[data_start..data_start + weight_bytes.len()].copy_from_slice(weight_bytes);
 
         self.dirty.store(true, Ordering::Release);
-        println!("[FABRIC] Embedded {} bytes of weights ({} layers, biases={})",
-            weight_bytes.len(), num_layers, has_biases);
+        println!(
+            "[FABRIC] Embedded {} bytes of weights ({} layers, biases={})",
+            weight_bytes.len(),
+            num_layers,
+            has_biases
+        );
 
         Ok(())
     }
@@ -732,7 +730,8 @@ pub fn create_genesis<D: ModelDims>(
     mmap[data_end..data_end + sig_bytes.len()].copy_from_slice(sig_bytes);
 
     // Flush to disk
-    mmap.flush().map_err(|e| FabricError::CheckpointFailed(e.to_string()))?;
+    mmap.flush()
+        .map_err(|e| FabricError::CheckpointFailed(e.to_string()))?;
 
     Ok(())
 }
@@ -754,13 +753,41 @@ mod tests {
     fn regions_are_page_aligned() {
         let regions = FabricRegions::compute::<Llama8B>();
 
-        assert_eq!(regions.weights_offset % 16384, 0, "weights must be 16KB aligned");
-        assert_eq!(regions.hot_pool_offset % 16384, 0, "hot_pool must be 16KB aligned");
-        assert_eq!(regions.cold_pool_offset % 16384, 0, "cold_pool must be 16KB aligned");
-        assert_eq!(regions.dict_offset % 16384, 0, "dictionary must be 16KB aligned");
-        assert_eq!(regions.obs_offset % 16384, 0, "observation bufs must be 16KB aligned");
-        assert_eq!(regions.trace_offset % 16384, 0, "trace log must be 16KB aligned");
-        assert_eq!(regions.total_size % 16384, 0, "total size must be 16KB aligned");
+        assert_eq!(
+            regions.weights_offset % 16384,
+            0,
+            "weights must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.hot_pool_offset % 16384,
+            0,
+            "hot_pool must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.cold_pool_offset % 16384,
+            0,
+            "cold_pool must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.dict_offset % 16384,
+            0,
+            "dictionary must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.obs_offset % 16384,
+            0,
+            "observation bufs must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.trace_offset % 16384,
+            0,
+            "trace log must be 16KB aligned"
+        );
+        assert_eq!(
+            regions.total_size % 16384,
+            0,
+            "total size must be 16KB aligned"
+        );
     }
 
     /// Verify regions don't overlap

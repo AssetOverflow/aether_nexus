@@ -3,9 +3,9 @@
 //! Ties the Cortex capabilities directly to the `InferenceEngine` streaming loop
 //! to execute "Thought -> Action -> Observation" cycles autonomously.
 
+use crate::cortex::Cortex;
 use crate::inference::InferenceEngine;
 use crate::tokenizer::Tokenizer;
-use crate::cortex::Cortex;
 use minijinja::{Environment, context};
 use serde::Serialize;
 use std::sync::mpsc::Receiver;
@@ -25,8 +25,20 @@ pub struct AgentLoop<'a> {
 }
 
 impl<'a> AgentLoop<'a> {
-    pub fn new(engine: &'a mut InferenceEngine, tokenizer: &'a Tokenizer, cortex: &'a mut Cortex, interrupt_rx: Receiver<String>, max_reflection_steps: usize) -> Self {
-        Self { engine, tokenizer, cortex, interrupt_rx, max_reflection_steps }
+    pub fn new(
+        engine: &'a mut InferenceEngine,
+        tokenizer: &'a Tokenizer,
+        cortex: &'a mut Cortex,
+        interrupt_rx: Receiver<String>,
+        max_reflection_steps: usize,
+    ) -> Self {
+        Self {
+            engine,
+            tokenizer,
+            cortex,
+            interrupt_rx,
+            max_reflection_steps,
+        }
     }
 
     /// Execute a text-based tool call and return the observation string.
@@ -55,11 +67,18 @@ impl<'a> AgentLoop<'a> {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
                         let stderr = String::from_utf8_lossy(&out.stderr);
-                        let result = if !stdout.is_empty() { stdout.to_string() } else { stderr.to_string() };
+                        let result = if !stdout.is_empty() {
+                            stdout.to_string()
+                        } else {
+                            stderr.to_string()
+                        };
                         // Truncate to avoid overwhelming the context (approx 500 chars)
                         let result_len = result.chars().count();
                         if result_len > 500 {
-                            format!("{}...[truncated]", result.chars().take(500).collect::<String>())
+                            format!(
+                                "{}...[truncated]",
+                                result.chars().take(500).collect::<String>()
+                            )
                         } else if result.is_empty() {
                             "(no output)".to_string()
                         } else {
@@ -78,7 +97,10 @@ impl<'a> AgentLoop<'a> {
                 match std::fs::read_to_string(&validated_path) {
                     Ok(content) => {
                         if content.chars().count() > 500 {
-                            format!("{}...[truncated]", content.chars().take(500).collect::<String>())
+                            format!(
+                                "{}...[truncated]",
+                                content.chars().take(500).collect::<String>()
+                            )
                         } else {
                             content
                         }
@@ -121,7 +143,11 @@ impl<'a> AgentLoop<'a> {
                 match output {
                     Ok(out) => {
                         let result = String::from_utf8_lossy(&out.stdout).to_string();
-                        if result.is_empty() { "clean - no changes".to_string() } else { result }
+                        if result.is_empty() {
+                            "clean - no changes".to_string()
+                        } else {
+                            result
+                        }
                     }
                     Err(e) => format!("Error: {}", e),
                 }
@@ -140,7 +166,10 @@ impl<'a> AgentLoop<'a> {
                     Ok(out) => {
                         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                         if stderr.chars().count() > 500 {
-                            format!("{}...[truncated]", stderr.chars().take(500).collect::<String>())
+                            format!(
+                                "{}...[truncated]",
+                                stderr.chars().take(500).collect::<String>()
+                            )
                         } else {
                             stderr
                         }
@@ -182,15 +211,34 @@ impl<'a> AgentLoop<'a> {
             .map_err(|e| format!("Failed to load template: {}", e))?;
 
         let capabilities = vec![
-            CapDesc { id: "ShellRunner".into(), description: "Run a shell command".into() },
-            CapDesc { id: "FileRead".into(), description: "Read a file".into() },
-            CapDesc { id: "FileWrite".into(), description: "Write a file".into() },
-            CapDesc { id: "DirList".into(), description: "List directory contents".into() },
-            CapDesc { id: "GitStatus".into(), description: "Get git repository status".into() },
-            CapDesc { id: "CargoCheck".into(), description: "Verify Rust compilation".into() },
+            CapDesc {
+                id: "ShellRunner".into(),
+                description: "Run a shell command".into(),
+            },
+            CapDesc {
+                id: "FileRead".into(),
+                description: "Read a file".into(),
+            },
+            CapDesc {
+                id: "FileWrite".into(),
+                description: "Write a file".into(),
+            },
+            CapDesc {
+                id: "DirList".into(),
+                description: "List directory contents".into(),
+            },
+            CapDesc {
+                id: "GitStatus".into(),
+                description: "Get git repository status".into(),
+            },
+            CapDesc {
+                id: "CargoCheck".into(),
+                description: "Verify Rust compilation".into(),
+            },
         ];
 
-        let system_prompt = env.get_template("system")
+        let system_prompt = env
+            .get_template("system")
             .map_err(|e| format!("Template get err: {}", e))?
             .render(context! {
                 persona => persona,
@@ -198,17 +246,16 @@ impl<'a> AgentLoop<'a> {
             })
             .map_err(|e| format!("Template render err: {}", e))?;
 
-        // ── Qwen Chat Template ──
-        // <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{task}<|im_end|>\n<|im_start|>assistant\n
+        // <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{task}<|im_end|>\n<|im_start|>assistant\n<think>\n
         let prompt = format!(
-            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n",
             system_prompt.trim(),
             user_task
         );
 
         let prompt_ids = self.tokenizer.encode(&prompt)?;
         println!("[AGENT] Prompt: {} tokens", prompt_ids.len());
-        
+
         use std::io::Write;
 
         // 1. Prefill
@@ -223,9 +270,15 @@ impl<'a> AgentLoop<'a> {
         let prefill_ms = prefill_start.elapsed().as_millis();
         let prefill_tps = if prefill_ms > 0 {
             (prompt_ids.len() - 1) as f64 / (prefill_ms as f64 / 1000.0)
-        } else { 0.0 };
-        println!("[PERF] Prefill: {} tokens in {}ms ({:.1} tok/s)",
-            prompt_ids.len() - 1, prefill_ms, prefill_tps);
+        } else {
+            0.0
+        };
+        println!(
+            "[PERF] Prefill: {} tokens in {}ms ({:.1} tok/s)",
+            prompt_ids.len() - 1,
+            prefill_ms,
+            prefill_tps
+        );
 
         let mut last_token = *prompt_ids.last().unwrap();
         let mut active_thought = String::new();
@@ -242,7 +295,10 @@ impl<'a> AgentLoop<'a> {
             // Check for interrupts non-blockingly
             if let Ok(msg) = self.interrupt_rx.try_recv() {
                 println!("\n\n[HITL INTERRUPT] User injected: {}\n", msg);
-                let interrupt_text = format!("<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", msg);
+                let interrupt_text = format!(
+                    "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                    msg
+                );
                 let interrupt_ids = self.tokenizer.encode(&interrupt_text)?;
                 if !interrupt_ids.is_empty() {
                     for i in 0..interrupt_ids.len() - 1 {
@@ -254,7 +310,7 @@ impl<'a> AgentLoop<'a> {
             }
 
             let next_token = self.engine.step(last_token)?;
-            last_token = next_token;  // MUST be set before any continue!
+            last_token = next_token; // MUST be set before any continue!
             decode_tokens += 1;
 
             // EOS or <|im_end|>
@@ -262,9 +318,13 @@ impl<'a> AgentLoop<'a> {
                 let decode_ms = decode_start.elapsed().as_millis();
                 let decode_tps = if decode_ms > 0 {
                     decode_tokens as f64 / (decode_ms as f64 / 1000.0)
-                } else { 0.0 };
-                println!("\n[PERF] Decode: {} tokens in {}ms ({:.1} tok/s)",
-                    decode_tokens, decode_ms, decode_tps);
+                } else {
+                    0.0
+                };
+                println!(
+                    "\n[PERF] Decode: {} tokens in {}ms ({:.1} tok/s)",
+                    decode_tokens, decode_ms, decode_tps
+                );
                 println!("[AGENT] ── Generation Complete ──");
                 break;
             }
@@ -300,9 +360,12 @@ impl<'a> AgentLoop<'a> {
             // ── Tool call parsing ──
             if active_thought.contains("</call>") {
                 tool_calls += 1;
-                
+
                 if tool_calls > self.max_reflection_steps {
-                    println!("\n[CORTEX] 🚨 MAX TOOL CALLS REACHED ({}). Forcing answer. 🚨", self.max_reflection_steps);
+                    println!(
+                        "\n[CORTEX] 🚨 MAX TOOL CALLS REACHED ({}). Forcing answer. 🚨",
+                        self.max_reflection_steps
+                    );
                     let override_text = "\nI've reached the tool call limit. Let me give my final answer based on what I know.\n\n";
                     let obs_ids = self.tokenizer.encode(override_text)?;
                     for (i, &obs_id) in obs_ids.iter().enumerate() {
@@ -318,20 +381,26 @@ impl<'a> AgentLoop<'a> {
                 }
 
                 // Extract tool call: <call>ToolName|arg</call>
-                if let (Some(start_idx), Some(end_idx)) = (active_thought.rfind("<call>"), active_thought.rfind("</call>")) {
-                    let call_content = &active_thought[start_idx + 6 .. end_idx];
+                if let (Some(start_idx), Some(end_idx)) = (
+                    active_thought.rfind("<call>"),
+                    active_thought.rfind("</call>"),
+                ) {
+                    let call_content = &active_thought[start_idx + 6..end_idx];
                     let call_content = call_content.trim().to_string();
-                    
+
                     println!("\n[CORTEX] ⚡ Executing: {}", call_content);
-                    
+
                     // Actually execute the tool!
                     let observation = self.execute_tool(&call_content);
-                    
-                    println!("[CORTEX] Result: {}", if observation.chars().count() > 100 { 
-                        format!("{}...", observation.chars().take(100).collect::<String>()) 
-                    } else { 
-                        observation.clone() 
-                    });
+
+                    println!(
+                        "[CORTEX] Result: {}",
+                        if observation.chars().count() > 100 {
+                            format!("{}...", observation.chars().take(100).collect::<String>())
+                        } else {
+                            observation.clone()
+                        }
+                    );
 
                     // Inject observation back into generation stream
                     let obs_text = format!("\nObservation: {}\n", observation);
@@ -346,14 +415,14 @@ impl<'a> AgentLoop<'a> {
                             last_token = obs_id;
                         }
                     }
-                    
+
                     full_trajectory.push_str(&obs_text);
                 }
-                
+
                 active_thought.clear();
             }
         }
-        
+
         Ok(full_trajectory)
     }
 }

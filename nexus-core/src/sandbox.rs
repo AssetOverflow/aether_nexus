@@ -20,6 +20,8 @@ pub struct SandboxPolicy {
     allowed_roots: Vec<PathBuf>,
     /// Allowed subprocess binary names (e.g. "cargo", "git", "ls").
     allowed_commands: HashSet<String>,
+    /// Clear parent environment variables for subprocesses.
+    pub clear_env: bool,
     /// Maximum execution timeout for subprocesses.
     pub max_timeout: Duration,
     /// Wasmtime fuel limit per execution.
@@ -37,26 +39,24 @@ impl SandboxPolicy {
         let allowed_roots: Vec<PathBuf> = config
             .workspace_roots
             .iter()
-            .filter_map(|root| {
-                match std::fs::canonicalize(root) {
-                    Ok(canonical) => Some(canonical),
-                    Err(e) => {
-                        eprintln!(
-                            "[SANDBOX] Warning: cannot canonicalize workspace root '{}': {}",
-                            root, e
-                        );
-                        None
-                    }
+            .filter_map(|root| match std::fs::canonicalize(root) {
+                Ok(canonical) => Some(canonical),
+                Err(e) => {
+                    eprintln!(
+                        "[SANDBOX] Warning: cannot canonicalize workspace root '{}': {}",
+                        root, e
+                    );
+                    None
                 }
             })
             .collect();
 
-        let allowed_commands: HashSet<String> =
-            config.allowed_commands.iter().cloned().collect();
+        let allowed_commands: HashSet<String> = config.allowed_commands.iter().cloned().collect();
 
         Self {
             allowed_roots,
             allowed_commands,
+            clear_env: config.clear_env,
             max_timeout: Duration::from_millis(config.max_subprocess_timeout_ms),
             wasm_fuel: config.wasm_fuel,
             wasm_memory_pages: config.wasm_memory_pages,
@@ -72,8 +72,22 @@ impl SandboxPolicy {
         let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
 
         let allowed_commands: HashSet<String> = [
-            "cargo", "git", "ls", "cat", "head", "tail", "find", "grep", "wc",
-            "echo", "mkdir", "touch", "cp", "mv", "rustfmt", "clippy-driver",
+            "cargo",
+            "git",
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "find",
+            "grep",
+            "wc",
+            "echo",
+            "mkdir",
+            "touch",
+            "cp",
+            "mv",
+            "rustfmt",
+            "clippy-driver",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -82,6 +96,7 @@ impl SandboxPolicy {
         Self {
             allowed_roots: vec![canonical_cwd],
             allowed_commands,
+            clear_env: true,
             max_timeout: Duration::from_secs(30),
             wasm_fuel: 1_000_000,
             wasm_memory_pages: 256, // 16 MB
@@ -202,9 +217,7 @@ impl SandboxPolicy {
         let parts: Vec<String> = shell_split(cmd)?;
 
         if parts.is_empty() {
-            return Err(CortexError::SandboxViolation(
-                "Empty command string".into(),
-            ));
+            return Err(CortexError::SandboxViolation("Empty command string".into()));
         }
 
         let binary = &parts[0];
@@ -313,6 +326,7 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            clear_env: true,
             max_timeout: Duration::from_secs(10),
             wasm_fuel: 1_000_000,
             wasm_memory_pages: 256,
@@ -325,7 +339,11 @@ mod tests {
         let root = &policy.allowed_roots[0];
         let test_file = root.join("allowed.txt");
         let result = policy.validate_path(test_file.to_str().unwrap());
-        assert!(result.is_ok(), "Should allow path inside workspace: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Should allow path inside workspace: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -342,7 +360,10 @@ mod tests {
         let policy = test_policy();
         let result = policy.validate_path("/etc/hosts");
         // /etc/hosts exists on macOS but is outside workspace
-        assert!(result.is_err(), "Should reject absolute path outside workspace");
+        assert!(
+            result.is_err(),
+            "Should reject absolute path outside workspace"
+        );
     }
 
     #[test]
@@ -356,10 +377,11 @@ mod tests {
         #[cfg(unix)]
         {
             let _ = std::os::unix::fs::symlink("/etc", &link_path);
-            let result = policy.validate_path(
-                link_path.join("hosts").to_str().unwrap(),
+            let result = policy.validate_path(link_path.join("hosts").to_str().unwrap());
+            assert!(
+                result.is_err(),
+                "Should reject symlink that escapes workspace"
             );
-            assert!(result.is_err(), "Should reject symlink that escapes workspace");
             let _ = fs::remove_file(&link_path);
         }
     }
@@ -428,6 +450,7 @@ mod tests {
         let policy = SandboxPolicy {
             allowed_roots: vec![],
             allowed_commands: HashSet::new(),
+            clear_env: true,
             max_timeout: Duration::from_secs(10),
             wasm_fuel: 0,
             wasm_memory_pages: 0,

@@ -17,11 +17,17 @@ fn compile_metal_shader(source: &str, name: &str, out_dir: &str) -> Option<Strin
 
     // Step 1: Compile MSL → AIR
     let status = Command::new("xcrun")
-        .args(["-sdk", "macosx", "metal",
-               "-c", source,
-               "-o", &air,
-               "-std=metal3.0",
-               "-O2"])
+        .args([
+            "-sdk",
+            "macosx",
+            "metal",
+            "-c",
+            source,
+            "-o",
+            &air,
+            "-std=metal3.0",
+            "-O2",
+        ])
         .status();
 
     match status {
@@ -32,14 +38,16 @@ fn compile_metal_shader(source: &str, name: &str, out_dir: &str) -> Option<Strin
             panic!("{} shader compilation failed (exit: {:?})", name, s.code());
         }
         Err(e) => {
-            panic!("xcrun not found or failed: {}. {} shader compilation aborted.", e, name);
+            panic!(
+                "xcrun not found or failed: {}. {} shader compilation aborted.",
+                e, name
+            );
         }
     }
 
     // Step 2: Link AIR → metallib
     let status = Command::new("xcrun")
-        .args(["-sdk", "macosx", "metallib",
-               &air, "-o", &metallib])
+        .args(["-sdk", "macosx", "metallib", &air, "-o", &metallib])
         .status();
 
     match status {
