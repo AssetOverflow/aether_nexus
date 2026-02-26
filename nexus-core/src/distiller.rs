@@ -62,20 +62,28 @@ impl<D: ModelDims> Distiller<D> {
         loop {
             sleep(Duration::from_secs(self.config.rem_interval_secs)).await;
 
-            let mut fab = match fabric.lock() {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Distiller: Fabric lock poisoned: {}", e);
-                    continue;
-                }
-            };
-
             // 1. Evaluate entropy of hot blocks
-            let candidates = self.evaluate_entropy(&fab);
+            let candidates = {
+                let fab = match fabric.lock() {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("Distiller: Fabric lock poisoned: {}", e);
+                        continue;
+                    }
+                };
+                self.evaluate_entropy(&fab)
+            };
             
             if !candidates.is_empty() {
-                // 2. Distill candidates
+                // 2. Distill candidates (locking individually to allow inference to interleave)
                 for block_idx in candidates {
+                    let mut fab = match fabric.lock() {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("Distiller: Fabric lock poisoned: {}", e);
+                            break;
+                        }
+                    };
                     if let Err(e) = Self::distill_block(&mut fab, block_idx) {
                         eprintln!("Distiller: block {} failed: {}", block_idx, e);
                     }
@@ -83,8 +91,10 @@ impl<D: ModelDims> Distiller<D> {
             }
 
             // 3. Persist
-            if let Err(e) = fab.checkpoint() {
-                eprintln!("Distiller: checkpoint failed: {}", e);
+            if let Ok(mut fab) = fabric.lock() {
+                if let Err(e) = fab.checkpoint() {
+                    eprintln!("Distiller: checkpoint failed: {}", e);
+                }
             }
         }
     }
@@ -222,7 +232,9 @@ impl<D: ModelDims> Distiller<D> {
             let mut code = SparseCode::zero();
             for k in 0..4 {
                 if k < scores.len() {
-                    code.indices[k] = scores[k].0 as u16;
+                    // Safety check based on previous test failing: index bounding
+                    let idx = scores[k].0;
+                    code.indices[k] = idx as u16;
                     code.coeffs[k] = f16::from_f32(scores[k].1);
                 }
             }

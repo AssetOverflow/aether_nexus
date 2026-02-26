@@ -237,7 +237,7 @@ impl Default for SparseCode {
 /// 2. A `Capability` trait implementation
 /// 3. Registration in `Cortex::boot()`
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumCount, strum::FromRepr)]
 pub enum CapabilityId {
     /// Invoke `cargo check` on a workspace (via subprocess)
     CargoCheck = 0,
@@ -260,23 +260,11 @@ pub enum CapabilityId {
 }
 
 impl CapabilityId {
-    /// Total number of registered capabilities
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = <Self as strum::EnumCount>::COUNT;
 
     /// Convert from raw u32 action tensor value
     pub fn from_raw(value: u32) -> Option<Self> {
-        match value {
-            0 => Some(Self::CargoCheck),
-            1 => Some(Self::VectorSearch),
-            2 => Some(Self::GitStatus),
-            3 => Some(Self::TensorRegex),
-            4 => Some(Self::SafeEval),
-            5 => Some(Self::FileRead),
-            6 => Some(Self::FileWrite),
-            7 => Some(Self::DirList),
-            8 => Some(Self::ShellRunner),
-            _ => None,
-        }
+        Self::from_repr(value)
     }
 }
 
@@ -463,7 +451,7 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Maximum size of a Cortex result write (bytes)
 pub const MAX_RESULT_SIZE: usize = 4096;
 
-/// WAL flush interval (milliseconds)
+/// Checkpoint flush interval (milliseconds)
 /// Checkpoint flush interval in milliseconds.
 ///
 /// NOTE: This is NOT a write-ahead log. The "WAL" name was misleading.

@@ -383,7 +383,7 @@ impl<D: ModelDims> Fabric<D> {
         &self.mmap[self.regions.radix_offset..self.regions.radix_offset + self.regions.radix_size]
     }
 
-    // ─── Mutable accessors (for Cortex dispatch + WAL) ───────────────────
+    // ─── Mutable accessors (for Cortex dispatch + Checkpoint) ──────────────
 
     /// Mutable view of the observation buffers for Cortex writes.
     ///

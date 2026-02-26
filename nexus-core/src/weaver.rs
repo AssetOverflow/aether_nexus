@@ -197,19 +197,22 @@ impl WeaverEngine {
 
     fn fill_f16(buf: &mut Buffer, cap: &mut u64, data: &[F16], dev: &Device, opts: MTLResourceOptions) {
         let needed = (data.len() * 2) as u64;
-        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        if needed == 0 { return; }
+        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 
     fn fill_u32(buf: &mut Buffer, cap: &mut u64, data: &[u32], dev: &Device, opts: MTLResourceOptions) {
         let needed = (data.len() * 4) as u64;
-        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        if needed == 0 { return; }
+        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 
     fn fill_sparse(buf: &mut Buffer, cap: &mut u64, data: &[SparseCode], dev: &Device, opts: MTLResourceOptions) {
         let needed = (data.len() * std::mem::size_of::<SparseCode>()) as u64;
-        if needed > *cap { *buf = dev.new_buffer(needed, opts); *cap = needed; }
+        if needed == 0 { return; }
+        if needed > *cap || *cap == 0 { *buf = dev.new_buffer(needed, opts); *cap = needed; }
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buf.contents() as *mut u8, needed as usize); }
     }
 

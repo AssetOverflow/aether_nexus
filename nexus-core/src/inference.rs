@@ -34,6 +34,8 @@ pub struct InferenceConfig {
     pub max_tokens: usize,
     /// End-of-sequence token ID (model-specific)
     pub eos_token_id: u32,
+    /// Turn-end token ID used for chat interruptions (<|im_end|>)
+    pub im_end_token_id: u32,
     /// Human-readable model name for logging
     pub model_name: String,
 }
@@ -58,6 +60,7 @@ impl InferenceConfig {
             temperature: 0.7,
             max_tokens: 128,
             eos_token_id: 0,
+            im_end_token_id: 0,
             model_name: "Granite 3.0 2B Instruct".into(),
         }
     }
@@ -81,6 +84,7 @@ impl InferenceConfig {
             temperature: 0.7,
             max_tokens: 256,
             eos_token_id: 151645,  // <|im_end|>
+            im_end_token_id: 151645,
             model_name: "Qwen 2.5 0.5B Instruct (System 1)".into(),
         }
     }
@@ -104,6 +108,7 @@ impl InferenceConfig {
             temperature: 0.6,   // Slightly lower for more focused reasoning
             max_tokens: 512,    // Longer context for reasoning chains
             eos_token_id: 151643,  // DeepSeek uses bos_token_id as eos
+            im_end_token_id: 151645, // <|im_end|>
             model_name: "DeepSeek-R1-Distill-Qwen-1.5B (System 2)".into(),
         }
     }
@@ -117,27 +122,36 @@ impl InferenceConfig {
         let config: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
+        let arch = config["architectures"]
+            .as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
+        let model_type = config["model_type"].as_str().unwrap_or("unknown");
         let hidden_size = config["hidden_size"].as_u64().unwrap_or(0) as usize;
         let num_layers = config["num_hidden_layers"].as_u64().unwrap_or(0) as usize;
 
-        // Match by (hidden_size, num_layers) fingerprint
-        match (hidden_size, num_layers) {
-            (2048, 40) => {
-                println!("[DETECT] Matched: Granite 3.0 2B Instruct");
-                Ok(Self::granite_2b())
-            }
-            (896, 24) => {
+        if (arch == "GraniteForCausalLM" || arch == "LlamaForCausalLM" || model_type == "granite") && hidden_size == 2048 {
+            println!("[DETECT] Matched: Granite 3.0 2B Instruct");
+            Ok(Self::granite_2b())
+        } else if arch == "Qwen2ForCausalLM" || model_type == "qwen2" {
+            if hidden_size == 896 {
                 println!("[DETECT] Matched: Qwen 2.5 0.5B Instruct");
                 Ok(Self::qwen_0_5b())
-            }
-            (1536, 28) => {
+            } else if hidden_size == 1536 {
                 println!("[DETECT] Matched: DeepSeek-R1-Distill-Qwen-1.5B");
                 Ok(Self::deepseek_r1_1_5b())
+            } else {
+                Err(format!(
+                    "Unknown Qwen2 model size: hidden_size={}, num_layers={}.",
+                    hidden_size, num_layers
+                ))
             }
-            _ => Err(format!(
-                "Unknown model architecture: hidden_size={}, num_layers={}. Add a config preset.",
-                hidden_size, num_layers
-            )),
+        } else {
+            Err(format!(
+                "Unknown model architecture: arch={}, type={}, hidden_size={}, num_layers={}. Add a config preset.",
+                arch, model_type, hidden_size, num_layers
+            ))
         }
     }
 }

@@ -29,12 +29,10 @@ fn compile_metal_shader(source: &str, name: &str, out_dir: &str) -> Option<Strin
             println!("cargo:warning={} shader compiled successfully", name);
         }
         Ok(s) => {
-            println!("cargo:warning={} shader compilation failed (exit: {:?})", name, s.code());
-            return None;
+            panic!("{} shader compilation failed (exit: {:?})", name, s.code());
         }
         Err(e) => {
-            println!("cargo:warning=xcrun not found: {}. Skipping {} shader.", e, name);
-            return None;
+            panic!("xcrun not found or failed: {}. {} shader compilation aborted.", e, name);
         }
     }
 
@@ -50,12 +48,10 @@ fn compile_metal_shader(source: &str, name: &str, out_dir: &str) -> Option<Strin
             Some(metallib)
         }
         Ok(s) => {
-            println!("cargo:warning={} metallib linking failed (exit: {:?})", name, s.code());
-            None
+            panic!("{} metallib linking failed (exit: {:?})", name, s.code());
         }
         Err(e) => {
-            println!("cargo:warning={} metallib linking error: {}", name, e);
-            None
+            panic!("{} metallib linking error: {}", name, e);
         }
     }
 }

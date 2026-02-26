@@ -135,7 +135,7 @@ fn tensor_to_f16(data: &[u8], dtype: Dtype) -> Result<Vec<F16>, String> {
 fn load_tensor(
     tensor_name: &str,
     file_map: &HashMap<String, String>,
-    file_cache: &HashMap<String, Vec<u8>>,
+    file_cache: &HashMap<String, memmap2::Mmap>,
 ) -> Result<Vec<F16>, String> {
     let file_name = file_map
         .get(tensor_name)
@@ -191,15 +191,17 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
             files
         };
 
-        let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut cache: HashMap<String, memmap2::Mmap> = HashMap::new();
         for file_name in &unique_files {
             let file_path = model_path.join(file_name);
             println!("[WEIGHTS] Loading {}...", file_name);
-            let data = fs::read(&file_path)
-                .map_err(|e| format!("Failed to read '{}': {}", file_name, e))?;
-            let size_mb = data.len() / (1024 * 1024);
-            println!("[WEIGHTS]   {} MB loaded", size_mb);
-            cache.insert(file_name.clone(), data);
+            let file = fs::File::open(&file_path)
+                .map_err(|e| format!("Failed to open '{}': {}", file_name, e))?;
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| format!("Failed to mmap '{}': {}", file_name, e))?;
+            let size_mb = mmap.len() / (1024 * 1024);
+            println!("[WEIGHTS]   {} MB mapped", size_mb);
+            cache.insert(file_name.clone(), mmap);
         }
 
         (index.weight_map, cache)
@@ -207,13 +209,15 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         // Single-shard: scan the file for all tensor names
         let file_name = "model.safetensors".to_string();
         println!("[WEIGHTS] Loading single shard: model.safetensors...");
-        let data = fs::read(&single_path)
-            .map_err(|e| format!("Failed to read model.safetensors: {}", e))?;
-        let size_mb = data.len() / (1024 * 1024);
-        println!("[WEIGHTS]   {} MB loaded", size_mb);
+        let file = fs::File::open(&single_path)
+            .map_err(|e| format!("Failed to open model.safetensors: {}", e))?;
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .map_err(|e| format!("Failed to mmap model.safetensors: {}", e))?;
+        let size_mb = mmap.len() / (1024 * 1024);
+        println!("[WEIGHTS]   {} MB mapped", size_mb);
 
         // Build weight_map by scanning all tensor names in the file
-        let tensors = SafeTensors::deserialize(&data)
+        let tensors = SafeTensors::deserialize(&mmap)
             .map_err(|e| format!("Failed to deserialize model.safetensors: {}", e))?;
         let mut wmap: HashMap<String, String> = HashMap::new();
         for name in tensors.names() {
@@ -221,8 +225,8 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         }
         println!("[WEIGHTS]   {} tensors found in single shard", wmap.len());
 
-        let mut cache: HashMap<String, Vec<u8>> = HashMap::new();
-        cache.insert(file_name, data);
+        let mut cache: HashMap<String, memmap2::Mmap> = HashMap::new();
+        cache.insert(file_name, mmap);
 
         (wmap, cache)
     } else {

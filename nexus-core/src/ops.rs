@@ -9,7 +9,7 @@ use metal::{
     MTLResourceOptions, MTLSize,
 };
 use half::f16 as F16;
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -20,7 +20,7 @@ pub struct OpsEngine {
     kernels: HashMap<&'static str, ComputePipelineState>,
     _library: Library,
     /// When Some, all ops encode into this shared command buffer (batch mode).
-    batch_cmd_buf: RefCell<Option<CommandBuffer>>,
+    batch_cmd_buf: Mutex<Option<CommandBuffer>>,
 }
 
 impl OpsEngine {
@@ -50,7 +50,7 @@ impl OpsEngine {
             kernels.insert(*name, pipeline);
         }
 
-        Ok(Self { device, queue, kernels, _library: library, batch_cmd_buf: RefCell::new(None) })
+        Ok(Self { device, queue, kernels, _library: library, batch_cmd_buf: Mutex::new(None) })
     }
 
     // ─── Batch mode ─────────────────────────────────────────────────────
@@ -58,12 +58,12 @@ impl OpsEngine {
     /// Start batch mode: all subsequent ops encode into ONE command buffer.
     pub fn begin_batch(&self) {
         let cmd_buf = self.queue.new_command_buffer();
-        *self.batch_cmd_buf.borrow_mut() = Some(cmd_buf.to_owned());
+        *self.batch_cmd_buf.lock().unwrap() = Some(cmd_buf.to_owned());
     }
 
     /// End batch mode: commit the shared command buffer and wait for GPU.
     pub fn end_batch(&self) {
-        if let Some(cmd_buf) = self.batch_cmd_buf.borrow_mut().take() {
+        if let Some(cmd_buf) = self.batch_cmd_buf.lock().unwrap().take() {
             cmd_buf.commit();
             cmd_buf.wait_until_completed();
         }
@@ -72,7 +72,7 @@ impl OpsEngine {
     /// Internal: encode a compute pass. In batch mode, uses the shared
     /// command buffer. Otherwise creates a standalone one.
     fn encode_compute<F: FnOnce(&metal::ComputeCommandEncoderRef)>(&self, f: F) {
-        let batch = self.batch_cmd_buf.borrow();
+        let batch = self.batch_cmd_buf.lock().unwrap();
         if let Some(ref cmd_buf) = *batch {
             let encoder = cmd_buf.new_compute_command_encoder();
             f(encoder);

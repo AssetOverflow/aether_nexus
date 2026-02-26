@@ -38,10 +38,18 @@ impl<'a> AgentLoop<'a> {
 
         match tool_name {
             "ShellRunner" => {
-                let output = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(tool_arg)
-                    .current_dir(".")
+                let policy = self.cortex.policy();
+                let (binary, cmd_args) = match policy.validate_command(tool_arg) {
+                    Ok(res) => res,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
+                let validated_cwd = match policy.validate_path(".") {
+                    Ok(p) => p,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
+                let output = std::process::Command::new(binary)
+                    .args(cmd_args)
+                    .current_dir(validated_cwd)
                     .output();
                 match output {
                     Ok(out) => {
@@ -61,7 +69,12 @@ impl<'a> AgentLoop<'a> {
                 }
             }
             "FileRead" => {
-                match std::fs::read_to_string(tool_arg) {
+                let policy = self.cortex.policy();
+                let validated_path = match policy.validate_path(tool_arg) {
+                    Ok(p) => p,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
+                match std::fs::read_to_string(&validated_path) {
                     Ok(content) => {
                         if content.len() > 500 {
                             format!("{}...[truncated]", &content[..500])
@@ -69,12 +82,17 @@ impl<'a> AgentLoop<'a> {
                             content
                         }
                     }
-                    Err(e) => format!("Error reading '{}': {}", tool_arg, e),
+                    Err(e) => format!("Error reading '{}': {}", validated_path.display(), e),
                 }
             }
             "DirList" => {
                 let dir = if tool_arg.is_empty() { "." } else { tool_arg };
-                match std::fs::read_dir(dir) {
+                let policy = self.cortex.policy();
+                let validated_path = match policy.validate_path(dir) {
+                    Ok(p) => p,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
+                match std::fs::read_dir(&validated_path) {
                     Ok(entries) => {
                         let mut listing = Vec::new();
                         for entry in entries.take(30) {
@@ -86,12 +104,18 @@ impl<'a> AgentLoop<'a> {
                         }
                         listing.join("\n")
                     }
-                    Err(e) => format!("Error listing '{}': {}", dir, e),
+                    Err(e) => format!("Error listing '{}': {}", validated_path.display(), e),
                 }
             }
             "GitStatus" => {
+                let policy = self.cortex.policy();
+                let validated_cwd = match policy.validate_path(".") {
+                    Ok(p) => p,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
                 let output = std::process::Command::new("git")
                     .args(["status", "--short"])
+                    .current_dir(validated_cwd)
                     .output();
                 match output {
                     Ok(out) => {
@@ -102,8 +126,14 @@ impl<'a> AgentLoop<'a> {
                 }
             }
             "CargoCheck" => {
+                let policy = self.cortex.policy();
+                let validated_cwd = match policy.validate_path(".") {
+                    Ok(p) => p,
+                    Err(e) => return format!("Security Error: {}", e),
+                };
                 let output = std::process::Command::new("cargo")
                     .args(["check", "--message-format", "short"])
+                    .current_dir(validated_cwd)
                     .output();
                 match output {
                     Ok(out) => {
@@ -123,8 +153,15 @@ impl<'a> AgentLoop<'a> {
                 if write_parts.len() < 2 {
                     "Error: FileWrite expects path|content".to_string()
                 } else {
-                    match std::fs::write(write_parts[0].trim(), write_parts[1]) {
-                        Ok(()) => format!("Written to {}", write_parts[0].trim()),
+                    let path = write_parts[0].trim();
+                    let content = write_parts[1];
+                    let policy = self.cortex.policy();
+                    let validated_path = match policy.validate_write_path(path) {
+                        Ok(p) => p,
+                        Err(e) => return format!("Security Error: {}", e),
+                    };
+                    match std::fs::write(&validated_path, content) {
+                        Ok(()) => format!("Written to {}", validated_path.display()),
                         Err(e) => format!("Error: {}", e),
                     }
                 }
@@ -194,7 +231,7 @@ impl<'a> AgentLoop<'a> {
         let mut full_trajectory = String::new();
         let mut tool_calls = 0;
         let eos_id = self.engine.config.eos_token_id;
-        let im_end_id: u32 = 151645;  // <|im_end|> token
+        let im_end_id = self.engine.config.im_end_token_id;
         let mut inside_think = false;
         let decode_start = std::time::Instant::now();
         let mut decode_tokens = 0u32;
