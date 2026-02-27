@@ -49,6 +49,7 @@ pub mod cortex;
 pub mod distiller;
 pub mod fabric;
 pub mod inference;
+pub mod logging;
 pub mod ops;
 pub mod sandbox;
 pub mod tokenizer;

@@ -210,7 +210,10 @@ impl FabricRegions {
                 // post_attention_layernorm
             );
         let global = 2 * (vocab * h + h); // embed_tokens + final_norm
-        layers * per_layer + global
+        
+        // Multiply by 1.25 to account for untied embeddings (lm_head) and biases.
+        let raw_estimate = layers * per_layer + global;
+        (raw_estimate as f64 * 1.25) as usize
     }
 }
 

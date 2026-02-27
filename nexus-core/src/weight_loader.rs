@@ -180,7 +180,7 @@ fn load_tensor(
 pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, String> {
     let model_path = Path::new(model_dir);
 
-    println!("[WEIGHTS] Loading from '{}'...", model_dir);
+    crate::nexus_info!("Loading from '{}'...", model_dir);
 
     // 1. Try multi-shard index first, fall back to single-file
     let index_path = model_path.join("model.safetensors.index.json");
@@ -193,8 +193,8 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         let index: SafetensorsIndex = serde_json::from_str(&index_data)
             .map_err(|e| format!("Failed to parse index: {}", e))?;
 
-        println!(
-            "[WEIGHTS] Index loaded: {} tensors across multiple shards",
+        crate::nexus_debug!(
+            "Index loaded: {} tensors across multiple shards",
             index.weight_map.len()
         );
 
@@ -208,13 +208,13 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         let mut cache: HashMap<String, memmap2::Mmap> = HashMap::new();
         for file_name in &unique_files {
             let file_path = model_path.join(file_name);
-            println!("[WEIGHTS] Loading {}...", file_name);
+            crate::nexus_debug!("Loading {}...", file_name);
             let file = fs::File::open(&file_path)
                 .map_err(|e| format!("Failed to open '{}': {}", file_name, e))?;
             let mmap = unsafe { memmap2::Mmap::map(&file) }
                 .map_err(|e| format!("Failed to mmap '{}': {}", file_name, e))?;
             let size_mb = mmap.len() / (1024 * 1024);
-            println!("[WEIGHTS]   {} MB mapped", size_mb);
+            crate::nexus_debug!("  {} MB mapped", size_mb);
             cache.insert(file_name.clone(), mmap);
         }
 
@@ -222,13 +222,13 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
     } else if single_path.exists() {
         // Single-shard: scan the file for all tensor names
         let file_name = "model.safetensors".to_string();
-        println!("[WEIGHTS] Loading single shard: model.safetensors...");
+        crate::nexus_debug!("Loading single shard: model.safetensors...");
         let file = fs::File::open(&single_path)
             .map_err(|e| format!("Failed to open model.safetensors: {}", e))?;
         let mmap = unsafe { memmap2::Mmap::map(&file) }
             .map_err(|e| format!("Failed to mmap model.safetensors: {}", e))?;
         let size_mb = mmap.len() / (1024 * 1024);
-        println!("[WEIGHTS]   {} MB mapped", size_mb);
+        crate::nexus_debug!("  {} MB mapped", size_mb);
 
         // Build weight_map by scanning all tensor names in the file
         let tensors = SafeTensors::deserialize(&mmap)
@@ -237,7 +237,7 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         for name in tensors.names() {
             wmap.insert(name.to_string(), file_name.clone());
         }
-        println!("[WEIGHTS]   {} tensors found in single shard", wmap.len());
+        crate::nexus_debug!("  {} tensors found in single shard", wmap.len());
 
         let mut cache: HashMap<String, memmap2::Mmap> = HashMap::new();
         cache.insert(file_name, mmap);
@@ -251,15 +251,15 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
     };
 
     // 2. Load embedding
-    println!("[WEIGHTS] Loading embeddings...");
+    crate::nexus_debug!("Loading embeddings...");
     let embed_tokens = load_tensor("model.embed_tokens.weight", &weight_map, &file_cache)?;
-    println!("[WEIGHTS]   embed_tokens: {} values", embed_tokens.len());
+    crate::nexus_debug!("  embed_tokens: {} values", embed_tokens.len());
 
     // 3. Load per-layer weights
     let mut layers = Vec::with_capacity(num_layers);
     for i in 0..num_layers {
-        if i % 10 == 0 {
-            println!("[WEIGHTS] Loading layer {}/{}...", i, num_layers);
+        if i == 0 || i == 10 || i == 20 {
+            crate::nexus_debug!("Loading layer {}/{}...", i, num_layers);
         }
         let prefix = format!("model.layers.{}", i);
 
@@ -285,7 +285,7 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         };
 
         if i == 0 && q_bias.is_some() {
-            println!("[WEIGHTS] QKV biases detected (Qwen-style)");
+            crate::nexus_debug!("QKV biases detected (Qwen-style)");
         }
 
         let layer = LayerWeights {
@@ -340,7 +340,7 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
         };
         layers.push(layer);
     }
-    println!("[WEIGHTS] All {} layers loaded", num_layers);
+    crate::nexus_debug!("All {} layers loaded", num_layers);
 
     // 4. Load final norm
     let final_norm = load_tensor("model.norm.weight", &weight_map, &file_cache)?;
@@ -349,11 +349,11 @@ pub fn load_weights(model_dir: &str, num_layers: usize) -> Result<ModelWeights, 
     let lm_head = if weight_map.contains_key("lm_head.weight") {
         load_tensor("lm_head.weight", &weight_map, &file_cache)?
     } else {
-        println!("[WEIGHTS] lm_head tied to embed_tokens");
+        crate::nexus_debug!("lm_head tied to embed_tokens");
         embed_tokens.clone()
     };
 
-    println!("[WEIGHTS] All weights loaded successfully");
+    crate::nexus_info!("All weights loaded successfully");
 
     Ok(ModelWeights {
         embed_tokens,
@@ -419,8 +419,8 @@ pub fn serialize_weights(weights: &ModelWeights) -> (Vec<u8>, bool) {
     // lm_head
     write_f16(&mut buf, &weights.lm_head);
 
-    println!(
-        "[WEIGHTS] Serialized {} bytes ({:.1} MB)",
+    crate::nexus_debug!(
+        "Serialized {} bytes ({:.1} MB)",
         buf.len(),
         buf.len() as f64 / (1024.0 * 1024.0)
     );

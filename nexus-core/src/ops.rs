@@ -23,6 +23,18 @@ pub struct OpsEngine {
     batch_cmd_buf: Mutex<Option<CommandBuffer>>,
 }
 
+impl Clone for OpsEngine {
+    fn clone(&self) -> Self {
+        Self {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            kernels: self.kernels.clone(),
+            _library: self._library.clone(),
+            batch_cmd_buf: Mutex::new(None),
+        }
+    }
+}
+
 impl OpsEngine {
     /// Create a new OpsEngine by loading the ops.metallib.
     pub fn new(metallib_path: &str) -> Result<Self, String> {
@@ -40,6 +52,7 @@ impl OpsEngine {
             "vecmat_scaled",
             "silu_gate",
             "add_residual",
+            "add_bias",
             "scale_f16",
             "matmul_scaled",
             "causal_attention",
@@ -212,27 +225,27 @@ impl OpsEngine {
         &self,
         q: &Buffer,
         k: &Buffer,
-        seq_len: u32,
+        num_tokens: u32,
         q_heads: u32,
         kv_heads: u32,
         head_dim: u32,
-        position: u32,
+        start_position: u32,
         theta: f32,
     ) {
         self.encode_compute(|encoder| {
             encoder.set_compute_pipeline_state(&self.kernels["rope"]);
             encoder.set_buffer(0, Some(q), 0);
             encoder.set_buffer(1, Some(k), 0);
-            encoder.set_bytes(2, 4, &seq_len as *const u32 as *const c_void);
+            encoder.set_bytes(2, 4, &num_tokens as *const u32 as *const c_void);
             encoder.set_bytes(3, 4, &q_heads as *const u32 as *const c_void);
             encoder.set_bytes(4, 4, &kv_heads as *const u32 as *const c_void);
             encoder.set_bytes(5, 4, &head_dim as *const u32 as *const c_void);
-            encoder.set_bytes(6, 4, &position as *const u32 as *const c_void);
+            encoder.set_bytes(6, 4, &start_position as *const u32 as *const c_void);
             encoder.set_bytes(7, 4, &theta as *const f32 as *const c_void);
             let half_dim = head_dim / 2;
             let max_heads = q_heads.max(kv_heads);
             encoder.dispatch_thread_groups(
-                MTLSize::new(((half_dim + 31) / 32) as u64, max_heads as u64, 1),
+                MTLSize::new(((half_dim + 31) / 32) as u64, max_heads as u64, num_tokens as u64),
                 MTLSize::new(32.min(half_dim as u64), 1, 1),
             );
         });
@@ -299,6 +312,21 @@ impl OpsEngine {
             encoder.dispatch_thread_groups(
                 MTLSize::new((size as u64 + tg_size - 1) / tg_size, 1, 1),
                 MTLSize::new(tg_size, 1, 1),
+            );
+        });
+    }
+
+    /// Add broadcast bias in place: x[t, d] += bias[d]
+    pub fn add_bias(&self, x: &Buffer, bias: &Buffer, hidden_size: u32, num_tokens: u32) {
+        self.encode_compute(|encoder| {
+            encoder.set_compute_pipeline_state(&self.kernels["add_bias"]);
+            encoder.set_buffer(0, Some(x), 0);
+            encoder.set_buffer(1, Some(bias), 0);
+            encoder.set_bytes(2, 4, &hidden_size as *const u32 as *const c_void);
+            encoder.set_bytes(3, 4, &num_tokens as *const u32 as *const c_void);
+            encoder.dispatch_thread_groups(
+                MTLSize::new((hidden_size as u64 + 255) / 256, num_tokens as u64, 1),
+                MTLSize::new(256, 1, 1),
             );
         });
     }
@@ -402,6 +430,7 @@ impl OpsEngine {
         head_dim: u32,
         q_heads: u32,
         kv_heads: u32,
+        num_queries: u32,
     ) {
         self.encode_compute(|encoder| {
             encoder.set_compute_pipeline_state(&self.kernels["multihead_attention"]);
@@ -413,9 +442,10 @@ impl OpsEngine {
             encoder.set_bytes(5, 4, &head_dim as *const u32 as *const c_void);
             encoder.set_bytes(6, 4, &q_heads as *const u32 as *const c_void);
             encoder.set_bytes(7, 4, &kv_heads as *const u32 as *const c_void);
+            encoder.set_bytes(8, 4, &num_queries as *const u32 as *const c_void);
             let tg_size = 64u64.min(head_dim as u64);
             encoder.dispatch_thread_groups(
-                MTLSize::new(q_heads as u64, 1, 1),
+                MTLSize::new(q_heads as u64, num_queries as u64, 1),
                 MTLSize::new(tg_size, 1, 1),
             );
         });

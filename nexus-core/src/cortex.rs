@@ -760,9 +760,14 @@ impl Capability for SafeEval {
 
         let wasm_bytes = &arg_buf[offset..offset + len];
 
-        println!(
-            "[CORTEX] SafeEval: executing {} bytes of WebAssembly (fuel={}, mem_pages={})",
-            len, policy.wasm_fuel, policy.wasm_memory_pages
+        crate::nexus_debug!(
+            "[CORTEX] SafeEval: executing {} bytes of WebAssembly",
+            len
+        );
+        crate::nexus_debug!(
+            "[CORTEX] Wasmtime fuel: {}, memory pages: {}",
+            policy.wasm_fuel,
+            policy.wasm_memory_pages
         );
 
         // Create engine with fuel metering enabled

@@ -1,0 +1,46 @@
+# AetherNexus Configuration Template
+# Place this in your project root to configure security and agent behavior.
+
+[security]
+# Absolute paths allowed for the agent to access.
+# If empty, the current working directory is used.
+workspace_roots = ["."]
+
+# Binaries the agent is allowed to execute via ShellRunner.
+allowed_commands = [
+    "cargo",
+    "git",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "find",
+    "grep",
+    "wc",
+    "echo",
+    "mkdir",
+    "touch",
+    "cp",
+    "mv",
+    "rustfmt"
+]
+
+# Max milliseconds a subprocess is allowed to run.
+max_subprocess_timeout_ms = 45000
+
+# Wasmtime resource limits
+wasm_fuel = 1000000
+wasm_memory_pages = 256
+clear_env = true
+
+[agent]
+# Maximum number of Thought -> Tool -> Observation cycles.
+max_reflection_steps = 15
+# Maximum tokens per response.
+max_tokens = 512
+
+[memory]
+# Entropy threshold for triggering background distillation.
+distill_entropy_threshold = 0.85
+# How often to check for REM (background work) cycles.
+rem_interval_secs = 60

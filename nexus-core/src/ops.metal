@@ -107,44 +107,50 @@ kernel void rms_norm(
 kernel void rope(
     device half*        q            [[buffer(0)]],
     device half*        k            [[buffer(1)]],
-    constant uint&      seq_len      [[buffer(2)]],
+    constant uint&      num_tokens   [[buffer(2)]],
     constant uint&      q_heads      [[buffer(3)]],
     constant uint&      kv_heads     [[buffer(4)]],
     constant uint&      head_dim     [[buffer(5)]],
-    constant uint&      position     [[buffer(6)]],
+    constant uint&      start_pos    [[buffer(6)]],
     constant float&     theta_base   [[buffer(7)]],
-    uint2 gid [[thread_position_in_grid]])
+    uint3 gid [[thread_position_in_grid]])
 {
     // gid.x = pair index within head (0..head_dim/2)
     // gid.y = head index
+    // gid.z = token index in the batch
     uint pair = gid.x;
     uint head = gid.y;
+    uint tok  = gid.z;
     uint half_dim = head_dim / 2;
 
-    if (pair >= half_dim) return;
+    if (pair >= half_dim || tok >= num_tokens) return;
 
-    // Compute the rotation angle
+    // Compute the rotation angle for this token's position
     float freq = 1.0f / pow(theta_base, float(2 * pair) / float(head_dim));
-    float angle = float(position) * freq;
+    float angle = float(start_pos + tok) * freq;
     float cos_val = cos(angle);
     float sin_val = sin(angle);
+
+    // Offset pointers for the batch token
+    device half* tok_q = q + tok * (q_heads * head_dim);
+    device half* tok_k = k + tok * (kv_heads * head_dim);
 
     // Apply to Q heads
     if (head < q_heads) {
         uint base = head * head_dim;
-        float q0 = float(q[base + pair]);
-        float q1 = float(q[base + pair + half_dim]);
-        q[base + pair]            = half(q0 * cos_val - q1 * sin_val);
-        q[base + pair + half_dim] = half(q0 * sin_val + q1 * cos_val);
+        float q0 = float(tok_q[base + pair]);
+        float q1 = float(tok_q[base + pair + half_dim]);
+        tok_q[base + pair]            = half(q0 * cos_val - q1 * sin_val);
+        tok_q[base + pair + half_dim] = half(q0 * sin_val + q1 * cos_val);
     }
 
     // Apply to K heads (fewer than Q due to GQA)
     if (head < kv_heads) {
         uint base = head * head_dim;
-        float k0 = float(k[base + pair]);
-        float k1 = float(k[base + pair + half_dim]);
-        k[base + pair]            = half(k0 * cos_val - k1 * sin_val);
-        k[base + pair + half_dim] = half(k0 * sin_val + k1 * cos_val);
+        float k0 = float(tok_k[base + pair]);
+        float k1 = float(tok_k[base + pair + half_dim]);
+        tok_k[base + pair]            = half(k0 * cos_val - k1 * sin_val);
+        tok_k[base + pair + half_dim] = half(k0 * sin_val + k1 * cos_val);
     }
 }
 
@@ -330,6 +336,24 @@ kernel void add_residual(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 6b. Bias Add (in-place broadcasting)
+//     x[t, d] += bias[d]
+// ─────────────────────────────────────────────────────────────────────────────
+
+kernel void add_bias(
+    device half*        x            [[buffer(0)]],
+    const device half*  bias         [[buffer(1)]],
+    constant uint&      hidden_size  [[buffer(2)]],
+    constant uint&      num_tokens   [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint d = gid.x;
+    uint t = gid.y;
+    if (d >= hidden_size || t >= num_tokens) return;
+    x[t * hidden_size + d] = half(float(x[t * hidden_size + d]) + float(bias[d]));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 7. Scaled matmul for logits — Tiled with shared memory
 //    Used for the final lm_head projection.
 //    C = A × B^T * scale  (output in f32 for logit precision)
@@ -489,29 +513,37 @@ kernel void multihead_attention(
     const device half*  K_cache      [[buffer(1)]],
     const device half*  V_cache      [[buffer(2)]],
     device half*        output       [[buffer(3)]],
-    constant uint&      kv_len       [[buffer(4)]],
+    constant uint&      total_kv_len [[buffer(4)]],
     constant uint&      head_dim     [[buffer(5)]],
     constant uint&      q_heads      [[buffer(6)]],
     constant uint&      kv_heads     [[buffer(7)]],
-    uint                q_head       [[threadgroup_position_in_grid]],
-    uint                tid          [[thread_index_in_threadgroup]],
-    uint                tgs          [[threads_per_threadgroup]])
+    constant uint&      num_queries  [[buffer(8)]],
+    uint2               tg_id        [[threadgroup_position_in_grid]],
+    uint2               tid_2d       [[thread_position_in_threadgroup]],
+    uint2               tgs_2d       [[threads_per_threadgroup]])
 {
-    if (q_head >= q_heads) return;
+    uint tid = tid_2d.x;
+    uint tgs = tgs_2d.x;
+    uint q_head = tg_id.x;
+    uint q_idx  = tg_id.y;
+    if (q_head >= q_heads || q_idx >= num_queries) return;
     
+    // For causal attention inside the batch, a query can only attend to cached keys up to its own position
+    uint valid_kv_len = total_kv_len - num_queries + 1 + q_idx;
+
     uint gqa_group = q_heads / kv_heads;
     uint kv_head = q_head / gqa_group;
     uint kv_stride = kv_heads * head_dim;
     
     float scale = rsqrt(float(head_dim));
     
-    const device half* Q_head = Q + q_head * head_dim;
-    device half* out_head = output + q_head * head_dim;
+    const device half* Q_head = Q + q_idx * (q_heads * head_dim) + q_head * head_dim;
+    device half* out_head = output + q_idx * (q_heads * head_dim) + q_head * head_dim;
     
     threadgroup float scores[4096];
     
     // Phase 1: Q·K^T / sqrt(d)
-    for (uint pos = tid; pos < kv_len; pos += tgs) {
+    for (uint pos = tid; pos < valid_kv_len; pos += tgs) {
         float score = 0.0f;
         const device half* K_pos = K_cache + pos * kv_stride + kv_head * head_dim;
         for (uint d = 0; d < head_dim; d++) {
@@ -524,7 +556,7 @@ kernel void multihead_attention(
     // Phase 2: max for stability
     threadgroup float shared_max[256];
     float local_max = -INFINITY;
-    for (uint pos = tid; pos < kv_len; pos += tgs) {
+    for (uint pos = tid; pos < valid_kv_len; pos += tgs) {
         local_max = max(local_max, scores[pos]);
     }
     shared_max[tid] = local_max;
@@ -538,7 +570,7 @@ kernel void multihead_attention(
     // Phase 3: exp + sum
     threadgroup float shared_sum[256];
     float local_sum = 0.0f;
-    for (uint pos = tid; pos < kv_len; pos += tgs) {
+    for (uint pos = tid; pos < valid_kv_len; pos += tgs) {
         scores[pos] = exp(scores[pos] - global_max);
         local_sum += scores[pos];
     }
@@ -551,7 +583,7 @@ kernel void multihead_attention(
     float total_sum = shared_sum[0];
     
     // Phase 4: normalize
-    for (uint pos = tid; pos < kv_len; pos += tgs) {
+    for (uint pos = tid; pos < valid_kv_len; pos += tgs) {
         scores[pos] /= total_sum;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -559,7 +591,7 @@ kernel void multihead_attention(
     // Phase 5: weighted sum of V
     for (uint d = tid; d < head_dim; d += tgs) {
         float acc = 0.0f;
-        for (uint pos = 0; pos < kv_len; pos++) {
+        for (uint pos = 0; pos < valid_kv_len; pos++) {
             acc += scores[pos] * float(V_cache[pos * kv_stride + kv_head * head_dim + d]);
         }
         out_head[d] = half(acc);

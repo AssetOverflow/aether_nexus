@@ -239,6 +239,11 @@ impl SandboxPolicy {
         Ok((binary_name.to_string(), args))
     }
 
+    /// Get the canonicalized workspace roots.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.allowed_roots
+    }
+
     /// Get the configured timeout duration.
     pub fn timeout(&self) -> Duration {
         self.max_timeout
