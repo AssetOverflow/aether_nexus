@@ -8,7 +8,7 @@ use crate::inference::InferenceEngine;
 use crate::tokenizer::Tokenizer;
 use minijinja::{Environment, context};
 use serde::Serialize;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc;
 
 #[derive(Serialize)]
 struct CapDesc {
@@ -21,7 +21,7 @@ pub struct AgentLoop<'a> {
     pub draft_engine: Option<&'a mut InferenceEngine>,
     pub tokenizer: &'a Tokenizer,
     pub cortex: &'a mut Cortex,
-    pub interrupt_rx: Receiver<String>,
+    pub interrupt_rx: mpsc::Receiver<String>,
     pub max_reflection_steps: usize,
     /// Speculative draft token queue
     pub draft_queue: std::collections::VecDeque<u32>,
@@ -33,7 +33,7 @@ impl<'a> AgentLoop<'a> {
         draft_engine: Option<&'a mut InferenceEngine>,
         tokenizer: &'a Tokenizer,
         cortex: &'a mut Cortex,
-        interrupt_rx: Receiver<String>,
+        interrupt_rx: mpsc::Receiver<String>,
         max_reflection_steps: usize,
     ) -> Self {
         Self {
@@ -274,11 +274,16 @@ impl<'a> AgentLoop<'a> {
         }
 
         let prefill_start = std::time::Instant::now();
-        for i in 0..prompt_ids.len() - 1 {
-            self.target_engine.step(prompt_ids[i], None)?;
+        let mut i = 0;
+        let prefill_end = prompt_ids.len() - 1;
+        while i < prefill_end {
+            let end = (i + crate::inference::InferenceEngine::MAX_BATCH).min(prefill_end);
+            let batch = &prompt_ids[i..end];
+            self.target_engine.forward_batch(batch)?;
             if let Some(ref mut draft) = self.draft_engine {
-                draft.step(prompt_ids[i], None)?;
+                draft.forward_batch(batch)?;
             }
+            i = end;
         }
         let prefill_ms = prefill_start.elapsed().as_millis();
         let prefill_tps = if prefill_ms > 0 {
@@ -326,7 +331,7 @@ impl<'a> AgentLoop<'a> {
             }
 
             // --- Grammar Constraints ---
-            let mut allowed_tokens: Option<&[u32]> = None;
+            let allowed_tokens: Option<&[u32]> = None;
             let mut new_tokens = Vec::new();
 
             if let Some(ref mut draft) = self.draft_engine {
@@ -348,7 +353,10 @@ impl<'a> AgentLoop<'a> {
                 target_inputs.push(last_token);
                 target_inputs.extend_from_slice(&draft_tokens);
                 
-                let all_logits = self.target_engine.forward_batch(&target_inputs)?;
+                self.target_engine.forward_batch(&target_inputs)?;
+                // Zero-copy read
+                let all_logits_slice = self.target_engine.read_logits(target_inputs.len());
+                let all_logits = all_logits_slice.to_vec(); // We need to_vec here because we use it below across multiple iterations, though we could optimize further.
                 let vocab = self.target_engine.config.vocab_size as usize;
                 
                 let mut accept_count = 0;

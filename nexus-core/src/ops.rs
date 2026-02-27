@@ -11,7 +11,12 @@ use metal::{
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::cell::RefCell;
+
+struct BatchState {
+    cmd_buf: CommandBuffer,
+    encoder: metal::ComputeCommandEncoder,
+}
 
 /// GPU Ops Engine – manages the Metal compute pipeline for transformer ops.
 pub struct OpsEngine {
@@ -19,8 +24,8 @@ pub struct OpsEngine {
     queue: CommandQueue,
     kernels: HashMap<&'static str, ComputePipelineState>,
     _library: Library,
-    /// When Some, all ops encode into this shared command buffer (batch mode).
-    batch_cmd_buf: Mutex<Option<CommandBuffer>>,
+    /// When Some, all ops encode into this shared command buffer and encoder (batch mode).
+    batch_state: RefCell<Option<BatchState>>,
 }
 
 impl Clone for OpsEngine {
@@ -30,7 +35,7 @@ impl Clone for OpsEngine {
             queue: self.queue.clone(),
             kernels: self.kernels.clone(),
             _library: self._library.clone(),
-            batch_cmd_buf: Mutex::new(None),
+            batch_state: RefCell::new(None),
         }
     }
 }
@@ -73,7 +78,7 @@ impl OpsEngine {
             queue,
             kernels,
             _library: library,
-            batch_cmd_buf: Mutex::new(None),
+            batch_state: RefCell::new(None),
         })
     }
 
@@ -81,27 +86,26 @@ impl OpsEngine {
 
     /// Start batch mode: all subsequent ops encode into ONE command buffer.
     pub fn begin_batch(&self) {
-        let cmd_buf = self.queue.new_command_buffer();
-        *self.batch_cmd_buf.lock().unwrap() = Some(cmd_buf.to_owned());
+        let cmd_buf = self.queue.new_command_buffer().to_owned();
+        let encoder = cmd_buf.new_compute_command_encoder().to_owned();
+        *self.batch_state.borrow_mut() = Some(BatchState { cmd_buf, encoder });
     }
 
     /// End batch mode: commit the shared command buffer and wait for GPU.
     pub fn end_batch(&self) {
-        if let Some(cmd_buf) = self.batch_cmd_buf.lock().unwrap().take() {
-            cmd_buf.commit();
-            cmd_buf.wait_until_completed();
+        if let Some(state) = self.batch_state.borrow_mut().take() {
+            state.encoder.end_encoding();
+            state.cmd_buf.commit();
+            state.cmd_buf.wait_until_completed();
         }
     }
 
     /// Internal: encode a compute pass. In batch mode, uses the shared
     /// command buffer. Otherwise creates a standalone one.
     fn encode_compute<F: FnOnce(&metal::ComputeCommandEncoderRef)>(&self, f: F) {
-        let batch = self.batch_cmd_buf.lock().unwrap();
-        if let Some(ref cmd_buf) = *batch {
-            let encoder = cmd_buf.new_compute_command_encoder();
-            f(encoder);
-            encoder.end_encoding();
-            // Don't commit — batch mode, will commit in end_batch()
+        let batch = self.batch_state.borrow_mut();
+        if let Some(ref state) = *batch {
+            f(&state.encoder);
         } else {
             drop(batch); // release borrow
             let cmd_buf = self.queue.new_command_buffer();
@@ -147,6 +151,12 @@ impl OpsEngine {
     pub fn read_f32(&self, buffer: &Buffer, count: usize) -> Vec<f32> {
         let ptr = buffer.contents() as *const f32;
         unsafe { std::slice::from_raw_parts(ptr, count).to_vec() }
+    }
+
+    /// Zero-copy read f32 data back from a GPU buffer.
+    pub fn read_f32_slice<'a>(&self, buffer: &'a Buffer, count: usize) -> &'a [f32] {
+        let ptr = buffer.contents() as *const f32;
+        unsafe { std::slice::from_raw_parts(ptr, count) }
     }
 
     // ─── Kernel dispatch methods ─────────────────────────────────────────

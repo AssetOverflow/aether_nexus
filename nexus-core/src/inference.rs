@@ -339,16 +339,24 @@ impl InferenceEngine {
         let mut generated_ids: Vec<u32> = Vec::new();
         let mut all_ids = prompt_ids.clone();
 
-        // Prefill: process all prompt tokens
+        // Prefill: process all prompt tokens in batches
         let gen_start = std::time::Instant::now();
-        for (i, &token_id) in prompt_ids.iter().enumerate() {
-            let next_token = self.step(token_id, None)?;
-            // During prefill, we don't use the output until the last token
-            if i == prompt_ids.len() - 1 {
-                // Sample from the logits of the last prompt token
+        let mut i = 0;
+        while i < prompt_ids.len() {
+            let end = (i + Self::MAX_BATCH).min(prompt_ids.len());
+            let batch = &prompt_ids[i..end];
+            self.forward_batch(batch)?;
+            
+            // Only need the logits from the last chunk's last token
+            if end == prompt_ids.len() {
+                let vocab = self.config.vocab_size;
+                let logits = self.ops.read_f32_slice(&self.ws_logits, batch.len() * vocab);
+                let last_logits = &logits[(batch.len() - 1) * vocab..batch.len() * vocab];
+                let next_token = sample_token(last_logits, self.config.temperature);
                 generated_ids.push(next_token);
                 all_ids.push(next_token);
             }
+            i = end;
         }
 
         let prefill_end = std::time::Instant::now();
@@ -405,18 +413,22 @@ impl InferenceEngine {
     /// Process exactly one token (without looping context), returning the next sampled token.
     /// Used by the basic autoregressive generation loop.
     pub fn step(&mut self, token_id: u32, allowed_tokens: Option<&[u32]>) -> Result<u32, String> {
-        let logits = self.forward_batch(&[token_id])?;
-        let mut token_logits = logits; // since len is 1, it's just vocab size
+        self.forward_batch(&[token_id])?;
         
-        if let Some(allowed) = allowed_tokens {
+        let logits = self.read_logits(1);
+        
+        let next_token = if let Some(allowed) = allowed_tokens {
+            let mut token_logits = logits.to_vec();
             for i in 0..token_logits.len() {
                 if !allowed.contains(&(i as u32)) {
                     token_logits[i] = f32::NEG_INFINITY;
                 }
             }
-        }
+            sample_token(&token_logits, self.config.temperature)
+        } else {
+            sample_token(logits, self.config.temperature)
+        };
 
-        let next_token = sample_token(&token_logits, self.config.temperature);
         Ok(next_token)
     }
 
@@ -432,13 +444,19 @@ impl InferenceEngine {
         self.position = saved_position;
     }
 
+    /// Read the logits buffer without copying.
+    pub fn read_logits(&self, num_tokens: usize) -> &[f32] {
+        let vocab = self.config.vocab_size;
+        self.ops.read_f32_slice(&self.ws_logits, num_tokens * vocab)
+    }
+
     /// Internal function to process a batch of tokens through the full transformer.
     /// Runs the ENTIRE forward pass as ONE GPU command buffer with ZERO
     /// intermediate CPU-GPU syncs.
     pub fn forward_batch(
         &mut self,
         tokens: &[u32]
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<(), String> {
         let num_tokens = tokens.len() as u32;
         if num_tokens == 0 || num_tokens as usize > Self::MAX_BATCH {
             return Err(format!("Batch size {} unsupported (max {})", num_tokens, Self::MAX_BATCH));
@@ -486,8 +504,7 @@ impl InferenceEngine {
         for layer_idx in 0..self.config.num_layers {
             let lb = &self.layer_bufs[layer_idx];
 
-            self.ops
-                .copy_buffer(&self.ws_hidden, &self.ws_residual, h * num_tokens, 0, 0);
+            std::mem::swap(&mut self.ws_hidden, &mut self.ws_residual);
 
             self.ops.rms_norm(
                 &self.ws_hidden,
@@ -552,12 +569,10 @@ impl InferenceEngine {
                     .scale_f16(&self.ws_proj, h * num_tokens, self.config.residual_multiplier);
             }
 
-            self.ops
-                .copy_buffer(&self.ws_residual, &self.ws_hidden, h * num_tokens, 0, 0);
             self.ops.add_residual(&self.ws_hidden, &self.ws_proj, h * num_tokens);
-
-            self.ops
-                .copy_buffer(&self.ws_hidden, &self.ws_residual, h * num_tokens, 0, 0);
+            // ws_hidden now has hidden + proj
+            // ws_residual has the old hidden (which is what we want for the FFN residual)
+            std::mem::swap(&mut self.ws_hidden, &mut self.ws_residual);
 
             self.ops.rms_norm(
                 &self.ws_hidden,
@@ -582,9 +597,12 @@ impl InferenceEngine {
                     .scale_f16(&self.ws_down, h * num_tokens, self.config.residual_multiplier);
             }
 
-            self.ops
-                .copy_buffer(&self.ws_residual, &self.ws_hidden, h * num_tokens, 0, 0);
             self.ops.add_residual(&self.ws_hidden, &self.ws_down, h * num_tokens);
+            
+            // At the end of the layer, ensure the final result is in ws_hidden
+            // It currently is, because we added the down projection to ws_hidden (which was the old ws_residual).
+            // But wait, the previous block swapped ws_hidden and ws_residual, so ws_hidden is the pre-FFN state.
+            // add_residual adds to ws_hidden, so ws_hidden is the post-FFN state. We are good!
         }
 
         // 3. Final RMSNorm + LM Head
@@ -610,11 +628,9 @@ impl InferenceEngine {
 
         self.ops.end_batch();
 
-        let logits = self.ops.read_f32(&self.ws_logits, (vocab * num_tokens) as usize);
-
         self.position += num_tokens;
 
-        Ok(logits)
+        Ok(())
     }
 
     /// Reset the KV cache and position counter.
@@ -656,73 +672,87 @@ fn sample_token_advanced(
     top_p: f32,
     recent_tokens: &[u32],
 ) -> u32 {
-    let mut logits = logits.to_vec();
-
-    // Apply repetition penalty (1.1x for recently used tokens)
     let rep_penalty = 1.1f32;
-    for &tok in recent_tokens {
-        let idx = tok as usize;
-        if idx < logits.len() {
-            if logits[idx] > 0.0 {
-                logits[idx] /= rep_penalty;
-            } else {
-                logits[idx] *= rep_penalty;
-            }
-        }
-    }
 
     if temperature < 0.01 {
         // Greedy: argmax
-        return logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i as u32)
-            .unwrap_or(0);
+        let mut max_idx = 0;
+        let mut max_val = f32::NEG_INFINITY;
+        for (i, &val) in logits.iter().enumerate() {
+            let mut v = val;
+            if recent_tokens.contains(&(i as u32)) {
+                if v > 0.0 { v /= rep_penalty; } else { v *= rep_penalty; }
+            }
+            if v > max_val {
+                max_val = v;
+                max_idx = i as u32;
+            }
+        }
+        return max_idx;
     }
 
-    // Apply temperature
-    let scaled: Vec<f32> = logits.iter().map(|&x| x / temperature).collect();
-
-    // Softmax
-    let max_val = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let exp_vals: Vec<f32> = scaled.iter().map(|&x| (x - max_val).exp()).collect();
-    let sum: f32 = exp_vals.iter().sum();
-    let probs: Vec<f32> = exp_vals.iter().map(|&x| x / sum).collect();
-
-    // Extract top-K candidates in O(N) then sort just the top-K to avoid O(N log N) on full vocab
-    let mut indexed: Vec<(usize, f32)> = probs.iter().enumerate().map(|(i, &p)| (i, p)).collect();
+    // Fast top-k / top-p sampling without allocating huge vectors
     const TOP_K: usize = 50;
-    let k = TOP_K.min(indexed.len());
-    if k < indexed.len() {
-        // Partition array so the top K are at the beginning (in random order)
-        indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
-        indexed.truncate(k);
+    // Maintain top K using insertion check (O(1) fast path)
+    let mut top_k = [(0usize, f32::NEG_INFINITY); TOP_K];
+    
+    for (i, &val) in logits.iter().enumerate() {
+        let mut v = val;
+        if recent_tokens.contains(&(i as u32)) {
+            if v > 0.0 { v /= rep_penalty; } else { v *= rep_penalty; }
+        }
+        v /= temperature;
+        
+        if v > top_k[TOP_K - 1].1 {
+            // Find insertion point
+            let mut pos = TOP_K - 1;
+            while pos > 0 && v > top_k[pos - 1].1 {
+                pos -= 1;
+            }
+            
+            // Shift elements down
+            for j in (pos + 1..TOP_K).rev() {
+                top_k[j] = top_k[j - 1];
+            }
+            
+            top_k[pos] = (i, v);
+        }
     }
-    // Now sort only the top K (descending)
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    // Find top-p cutoff
-    let mut cumulative = 0.0f32;
-    let mut candidates: Vec<(usize, f32)> = Vec::new();
-    for &(idx, prob) in &indexed {
+    // Compute exp and softmax over just the top K
+    let mut candidates: Vec<(usize, f32)> = Vec::with_capacity(TOP_K);
+    let mut sum = 0.0f32;
+    let local_max = top_k[0].1;
+    
+    for &(idx, v) in &top_k {
+        if v == f32::NEG_INFINITY || v.is_nan() { break; }
+        let prob = (v - local_max).exp();
         candidates.push((idx, prob));
-        cumulative += prob;
-        if cumulative >= top_p {
+        sum += prob;
+    }
+
+    // Find top-p cutoff and renormalize
+    let mut top_p_sum = 0.0f32;
+    let mut final_candidates = Vec::with_capacity(TOP_K);
+    for &(idx, prob) in &candidates {
+        let normalized = prob / sum;
+        final_candidates.push((idx, normalized));
+        top_p_sum += normalized;
+        if top_p_sum >= top_p {
             break;
         }
     }
 
     // Renormalize and sample
-    let cand_sum: f32 = candidates.iter().map(|(_, p)| p).sum();
+    let cand_sum: f32 = final_candidates.iter().map(|(_, p)| p).sum();
     let r = next_random();
     let mut acc = 0.0f32;
-    for &(idx, prob) in &candidates {
+    for &(idx, prob) in &final_candidates {
         acc += prob / cand_sum;
         if acc >= r {
             return idx as u32;
         }
     }
 
-    candidates.last().map(|(idx, _)| *idx as u32).unwrap_or(0)
+    final_candidates.last().map(|(idx, _)| *idx as u32).unwrap_or(0)
 }

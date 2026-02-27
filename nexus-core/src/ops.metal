@@ -226,8 +226,8 @@ kernel void matmul_f16(
 //     Dispatch: threadgroups=(ceil(N/8),1,1), threads=(256,1,1).
 // ─────────────────────────────────────────────────────────────────────────────
 
-constant uint VECMAT_TG = 256;
-constant uint VECMAT_COLS = 8;  // output columns per threadgroup (256 / 32)
+constant uint VECMAT_TG = 512;
+constant uint VECMAT_COLS = 16;  // output columns per threadgroup (512 / 32)
 
 kernel void vecmat_f16(
     const device half*  A            [[buffer(0)]],
@@ -244,9 +244,17 @@ kernel void vecmat_f16(
     uint col = bid * VECMAT_COLS + simd_id;
     if (col >= N) return;
 
-    // Each lane handles every 32nd element of the dot product → coalesced reads
+    // Vectorized half4 loads
     float sum = 0.0f;
-    for (uint k = lane; k < K; k += 32) {
+    uint k_limit = (K / 4) * 4;
+    for (uint k = lane * 4; k < k_limit; k += 128) {
+        half4 a_val = *reinterpret_cast<const device half4*>(A + k);
+        half4 b_val = *reinterpret_cast<const device half4*>(B + col * K + k);
+        sum += float(a_val.x) * float(b_val.x) + float(a_val.y) * float(b_val.y)
+             + float(a_val.z) * float(b_val.z) + float(a_val.w) * float(b_val.w);
+    }
+    // Tail
+    for (uint k = k_limit + lane; k < K; k += 32) {
         sum += float(A[k]) * float(B[col * K + k]);
     }
 
@@ -284,8 +292,17 @@ kernel void vecmat_scaled(
     uint col = bid * VECMAT_COLS + simd_id;
     if (col >= N) return;
 
+    // Vectorized half4 loads
     float sum = 0.0f;
-    for (uint k = lane; k < K; k += 32) {
+    uint k_limit = (K / 4) * 4;
+    for (uint k = lane * 4; k < k_limit; k += 128) {
+        half4 a_val = *reinterpret_cast<const device half4*>(A + k);
+        half4 b_val = *reinterpret_cast<const device half4*>(B + col * K + k);
+        sum += float(a_val.x) * float(b_val.x) + float(a_val.y) * float(b_val.y)
+             + float(a_val.z) * float(b_val.z) + float(a_val.w) * float(b_val.w);
+    }
+    // Tail
+    for (uint k = k_limit + lane; k < K; k += 32) {
         sum += float(A[k]) * float(B[col * K + k]);
     }
 

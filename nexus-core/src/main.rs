@@ -13,13 +13,12 @@
 
 use nexus_core::agent::AgentLoop;
 use nexus_core::bench::{BenchConfig, run_benchmark};
-use nexus_core::cortex::Cortex;
 use nexus_core::distiller::Distiller;
 use nexus_core::fabric::{Fabric, create_genesis};
 use nexus_core::inference::{InferenceConfig, InferenceEngine};
 use nexus_core::ops::OpsEngine;
 use nexus_core::tokenizer::Tokenizer;
-use nexus_core::types::{FabricLayout, NexusConfig, DeepSeekR1_1_5B, Qwen05B};
+use nexus_core::types::{NexusConfig, DeepSeekR1_1_5B, Qwen05B};
 use nexus_core::weaver::WeaverEngine;
 use nexus_core::weight_loader::{load_weights, load_weights_from_fabric, serialize_weights};
 use std::env;

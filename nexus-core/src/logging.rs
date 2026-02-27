@@ -8,18 +8,19 @@
 //!
 //! ```rust
 //! // Initialize early in main()
-//! nexus_core::logging::init(false); // false = normal, true = verbose
+//! nexus_core::logging::init(false, false); // false = normal, true = verbose, false = no thinking
 //!
 //! // Then use the macros anywhere
-//! nexus_info!("Fabric mapped: {} MB", total_mb);
-//! nexus_debug!("KV cache elem_offset = {}", kv_elem_offset);
-//! nexus_warn!("Weight embed failed: {}", e);
+//! use nexus_core::{nexus_info, nexus_debug, nexus_warn};
+//! nexus_info!("Fabric mapped: {} MB", 1024);
+//! nexus_debug!("KV cache elem_offset = {}", 42);
+//! nexus_warn!("Weight embed failed: {}", "error");
 //! ```
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::SystemTime;
 
@@ -64,6 +65,7 @@ pub struct NexusLogger {
     /// Sender channel for fast, lock-free logging
     sender: mpsc::Sender<LogMessage>,
     /// Minimum level for console output.
+    #[allow(dead_code)]
     console_level: Level,
     /// Whether to show full boot diagnostics on console.
     pub verbose: bool,
